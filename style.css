@@ -31,6 +31,8 @@
 .ts-tab { flex: 1 1 auto; padding: 8px 10px; background: none; border: none; color: var(--ts-dim); cursor: pointer; font: inherit; border-bottom: 2px solid transparent; }
 .ts-tab.ts-on { color: var(--ts-fg); border-bottom-color: var(--ts-accent); font-weight: 600; }
 .ts-panel-body { padding: 10px; max-height: 76vh; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+/* (a child that scrolls sideways, as the keys tables do, would otherwise be squeezed to nothing when the panel is full) */
+.ts-panel-body > * { flex-shrink: 0; }
 .ts-empty { padding: 20px; }
 
 .ts-row { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: end; }
@@ -48,6 +50,10 @@ input.ts-input[type=number] { width: 78px; }
 input.ts-input[type=text] { width: 180px; }
 .ts-file { max-width: 100%; font-size: 12px; }
 .ts-check { appearance: auto; accent-color: var(--ts-accent); width: 16px; height: 16px; margin: 4px 0; }
+/* Gradio draws its own boxes (a white tick on a white box when checked): ours show the accent colour when on */
+.ts-app input.ts-check { background-color: var(--input-background-fill, var(--ts-bg2)) !important; border: 1px solid var(--ts-dim) !important;
+                         border-radius: 3px !important; cursor: pointer; }
+.ts-app input.ts-check:checked { background-color: var(--ts-accent) !important; border-color: var(--ts-accent) !important; }
 .ts-colour { width: 42px; height: 26px; padding: 0; border: 1px solid var(--ts-line); border-radius: 4px; background: none; }
 .ts-slider { display: inline-flex; align-items: center; gap: 6px; }
 .ts-range { width: 110px; accent-color: var(--ts-accent); }
@@ -95,8 +101,8 @@ input.ts-input[type=text] { width: 180px; }
 .ts-stage-view { position: relative; display: flex; justify-content: center; align-items: center; min-height: 200px; background: #000; border-radius: 8px; overflow: hidden; }
 .ts-canvas { display: block; cursor: grab; touch-action: none; }
 .ts-canvas:active { cursor: grabbing; }
-.ts-transport { display: flex; align-items: center; gap: 8px; }
-.ts-time { flex: 1; accent-color: var(--ts-accent); }
+.ts-transport { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.ts-time { flex: 1 1 140px; min-width: 120px; accent-color: var(--ts-accent); }
 .ts-clock { font-variant-numeric: tabular-nums; min-width: 88px; }
 .ts-play { width: 40px; }
 .ts-info { color: var(--ts-dim); font-size: 12px; min-height: 16px; }
@@ -110,3 +116,35 @@ input.ts-input[type=text] { width: 180px; }
 .ts-stage-row { display: flex; gap: 6px; align-items: center; }
 .ts-stage-row input.ts-input[type=number] { width: 62px; }
 .ts-stage-text { flex: 1; min-width: 0; width: auto !important; }
+
+/* steering: the button lit while it steers, the joystick over the picture, the trail seen from above */
+.ts-steer.ts-on { background: var(--ts-accent); border-color: var(--ts-accent); color: #fff; }
+.ts-joystick { position: absolute; inset-inline-end: 14px; bottom: 14px; width: 104px; height: 104px; border-radius: 50%;
+               background: rgba(255, 255, 255, .10); border: 2px solid rgba(255, 255, 255, .35); touch-action: none; cursor: grab;
+               display: none; align-items: center; justify-content: center; backdrop-filter: blur(2px); }
+.ts-stage-view.ts-steering .ts-joystick { display: flex; }
+.ts-knob { width: 40px; height: 40px; border-radius: 50%; background: var(--ts-accent); box-shadow: 0 0 0 3px rgba(255, 255, 255, .5); pointer-events: none; }
+.ts-live-badge { position: absolute; inset-inline-start: 12px; top: 10px; padding: 3px 9px; border-radius: 10px; font-size: 12px;
+                 background: rgba(208, 68, 62, .85); color: #fff; display: none; }
+.ts-stage-view.ts-live .ts-live-badge { display: block; }
+.ts-steer-hint { position: absolute; inset-inline-start: 12px; bottom: 12px; font-size: 12px; color: rgba(255, 255, 255, .8);
+                 text-shadow: 0 1px 2px #000; display: none; max-width: 60%; }
+.ts-stage-view.ts-steering .ts-steer-hint { display: block; }
+.ts-map { width: 100%; height: 170px; background: var(--ts-bg); border: 1px solid var(--ts-line); border-radius: 5px; }
+.ts-dqt-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--ts-bad); margin-inline-end: 5px; }
+.ts-dqt-dot.ts-on { background: var(--ts-ok); }
+
+/* generating: scenes and ControlNet units */
+.ts-scene { display: grid; grid-template-columns: 64px 1fr auto; gap: 4px 6px; align-items: center; padding: 6px; border: 1px solid var(--ts-line); border-radius: 5px; background: var(--ts-bg); }
+.ts-scene input.ts-input[type=number] { width: 60px; }
+.ts-scene .ts-stage-text { grid-column: 2; }
+.ts-scene-files { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; font-size: 12px; color: var(--ts-dim); }
+.ts-pick { font-size: 12px; padding: 2px 8px; }
+.ts-units { display: flex; flex-direction: column; gap: 6px; }
+.ts-unit { display: flex; flex-direction: column; gap: 3px; padding-bottom: 5px; border-bottom: 1px solid var(--ts-line); }
+.ts-unit:last-child { border-bottom: none; }
+.ts-unit-name { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.ts-unit-values { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: end; padding-inline-start: 22px; }
+.ts-unit-values .ts-range { width: 80px; }
+.ts-unit-values input.ts-input[type=number] { width: 56px; }
+.ts-missing { color: var(--ts-warn); font-size: 11px; }

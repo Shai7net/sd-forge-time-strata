@@ -19,12 +19,12 @@ A dance becomes a winding ribbon of movement. A gesture becomes a tunnel. With t
 
 - **Video and image sequences.** Import a video, a ZIP of frames, or multiple images, including transparent PNGs.
 - **Clean subject extraction.** Use existing transparency, colour keying, BiRefNet, rembg models or optional Robust Video Matting. Alpha cleanup, edge decontamination and body alignment help keep stacked frames clear.
-- **Sculpt motion in space.** Arrange layers along a line, arc, S-curve, rising path or spiral. Adjust spacing, orientation and twist. Reuse a chain's frames in another arrangement.
+- **Sculpt motion in space.** Arrange layers along a line, arc, S-curve, rising path or spiral, or **steer the trail by hand**: while the shot plays (or while Deforum draws), the arrows, W A S D, an on-screen joystick or DeforumationQT turn it left and right and make it climb. Adjust spacing, orientation and twist. Reuse a chain's frames in another arrangement.
 - **Animate time.** Display all layers at once, consume the chain as the present advances, or grow a trail behind the present.
-- **Direct the camera.** Use presets, edit camera keys, follow the moving present, or turn a freely chosen view into a keyframe.
+- **Direct the camera.** A **follow camera** keeps the figure where you want it — from which side, how high, how large in the picture, where it looks — and swings smoothly with the trail's turns; its proportions come from the lens and the figure's height. Or use keys along the chain, presets, and turn a freely chosen view into a keyframe.
 - **Slice through the scene.** Animate a cutting plane to reveal a cross-section through the layers.
 - **Build a setting.** Choose sky and ground colours or upload a 360° panorama. Optional Simulation 360 integration can copy an existing panorama into your project.
-- **Transform the performer.** Optional Deforum generation uses a source chain as motion guidance and supports prompt stages along the sequence.
+- **Transform the performer.** Optional Deforum generation draws a new figure over a motion chain — or straight from a video you give it — with **scenes** along the time (each with its own prompt, blended into the next), an optional **texture fill** of the figure (water, fire, stone…), and **ControlNet units** for pose, depth, edges, silhouette (QR Monster) and the look of a picture (IP-Adapter). Each frame appears in the 3D view as soon as it is drawn.
 - **Export with music.** Record H.264 MP4, optional NVIDIA NVENC MP4 or VP9 WebM, with portrait, landscape and square sizes and optional supersampling.
 - **Work locally.** Projects and exports stay on your machine. The scene runs in your browser with WebGL2; Python handles frame preparation and video encoding.
 
@@ -93,6 +93,20 @@ output/time-strata/             Exported videos
 
 Change project and export locations under **Settings → Time Strata**. Back up the entire project folder, including uploads and chains; the JSON document alone does not contain the media.
 
+## Steering the trail and the follow camera
+
+1. In **Camera**, choose **Follow the figure** and a ready-made move (**In front**, **From the side**, **Close up**, **Reveal the trail**…). Drag on the picture to turn around the figure, use the wheel for its size in the picture, and click **A key here** to keep it at that moment; the sliders set the same values precisely.
+2. Press **🎮 Steer** under the picture. The shot plays, and **← →** (or **A D**) turn the trail, **↑ ↓** (or **W S**) make it climb; the joystick on the picture does the same. Left and right are the screen's, so the figure goes where you push from any camera angle. The camera follows with a calm swing.
+3. A take ends where the shot ends; **Chains › Steering** shows the trail from above, the steering strength and smoothing, **Undo the last steering** and **Straighten the trail**.
+4. **DeforumationQT:** tick **Steer from DeforumationQT** in the same section. Its pan left/right and up/down steer the trail, its rotation turns the follow camera around the figure and its zoom brings it closer. Time Strata only reads DeforumationQT's mediator; nothing there is changed.
+
+## Generating with Deforum, ControlNet and scenes
+
+1. In **Generate**, choose a motion chain — or give a video of a moving figure, which is cut into a motion chain first.
+2. Write **Who is drawn**, or add **Scenes along the time** (Infinite-Zoom style: each scene starts at a second of the motion and blends into the next over **Blend**). **Four elements** and **A life** are ready-made sets. A scene may carry its own **Texture** (filling the figure before it is drawn) and **Look** picture (IP-Adapter).
+3. Under **ControlNet**, switch on what should hold the drawing to the motion: **Pose** is enough for a person; add **Silhouette** for a figure made of something else (water, fire, smoke), **Depth** or **Edges** for more of the body. Each unit has a weight and the part of the steps it acts in. A unit without a model in this Forge is shown as left out.
+4. Choose the **Checkpoint** (Forge's own is put back afterwards), sampler, steps and how much of the motion frame is kept, then **Generate with Deforum**. The new chain grows in the 3D view frame by frame; press **🎮 Steer** to move it through space while it grows. At the end it is cut cleanly (the backdrop's colour together with BiRefNet-lite, so see-through figures stay whole) and stands where the motion stood.
+
 ## Optional: one dance across a lifetime
 
 The example demonstrates a creative use of Deforum: preserve the movement of a performance while changing its appearance along the timeline.
@@ -124,7 +138,7 @@ Extraction uses ONNX Runtime's CUDA provider when available, with CPU as fallbac
 
 **Graphics memory and BiRefNet-lite.** Before a cut, Time Strata asks every memory manager the host has loaded to release its models (a Forge with files of two generations can have both). BiRefNet-lite needs about 6 GB in full precision and under 4 GB in half precision, with practically the same cut (99.95% overlap on test footage). A half-precision copy (`birefnet-general-lite.fp16.onnx` beside the original in `models/time-strata`) is used automatically when present; make it once with `tools/make_birefnet_fp16.py` (the script's header shows a one-line `uv` command that keeps Forge's environment untouched). When the card still has too little free memory, the chain is cut again from its first frame with a lighter model (RVM for videos, u2net otherwise) and the chain's panel says so, instead of failing part-way.
 
-**Steadier cuts.** A frame whose cut jumps from its neighbours keeps only what lies near the figure in the frames around it, and separate pieces that lie mostly above the head or below the feet (stage lights, signs) are removed. For footage whose camera moves up and down, choose **Ground → Feet always on the ground**.
+**Steadier cuts.** A frame whose cut jumps from its neighbours keeps only what lies near the figure in the frames around it, and separate pieces that lie mostly above the head or below the feet (stage lights, signs) are removed. For footage whose camera moves up and down, choose **Ground → Feet always on the ground**. Black bars around a video's picture (a wide film inside an upright video) are found and cut away first, and the background is judged on the first two seconds, so a dark fade-in is not taken for a flat backdrop.
 
 ## API and development
 

@@ -1,14 +1,19 @@
 """Generating a chain's frames with Deforum, set up for the shot.
 
 The frames of a chain made from a video are the motion. They are laid on a flat backdrop and given to Deforum
-as its Video Input and as ControlNet's pose video, so every frame it draws has the figure exactly where the
-motion chain has it, on a backdrop whose colour is known. And:
+as its Video Input and to ControlNet, so every frame it draws has the figure exactly where the motion chain has
+it, on a backdrop whose colour is known. And:
 - Deforum's own camera stands still (the 3D camera is Time Strata's). DeforumationQT is left out of these frames:
   it would move the camera and set the steps. Its switch is turned off in memory only for the job and put back
-  when the job ends; its file is never written.
+  when the job ends; its file is never written. (Its pan and rotation still steer the trail: see dqt.py.)
 - The seed is fixed, so neighbouring frames, which stand a few centimetres apart in the chain, share their
   texture and the chain reads as one body.
-- The stages of the prompt are keyframes at their frames; Deforum blends each into the next (a baby growing old).
+- Scenes (as in Infinite Zoom): each starts at a second of the motion with its own prompt, and may fill the
+  figure with its own texture and give it its own look picture; one scene blends into the next over `blend`
+  seconds, its prompt by Deforum's composable weights ("a :0.7 AND b :0.3"), its texture and look by a crossfade.
+- ControlNet units hold the drawing to the motion: the pose, the depth, the edges, the silhouette (QR Monster)
+  and the look of a picture (IP-Adapter), each with its own weight and the part of the steps it acts in.
+- While Deforum draws, every new frame is cut by the backdrop's colour and shown in the 3D view at once.
 - The cut takes the backdrop away by its colour, keeps the motion figure's body solid and nothing far from it.
 - Deforum writes into the chain's own folder, not into the usual outputs.
 """
@@ -16,6 +21,7 @@ motion chain has it, on a backdrop whose colour is known. And:
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -30,18 +36,42 @@ from PIL import Image
 from . import chain, compat, cut, jobs, media, store
 
 DEFAULTS = {
-    "prompt": "", "stages": [], "negative": "blurry, deformed, extra limbs, text, watermark, nsfw, nude",
-    "prefix": "<lora:LCM_SD15:1>", "sampler": "LCM", "steps": 8, "cfg": 1.5, "strength": 0.3, "pose": 0.9,
+    "prompt": "", "stages": [], "scenes": [], "blend": 1.0,
+    "negative": "blurry, deformed, extra limbs, text, watermark, nsfw, nude",
+    "prefix": "<lora:LCM_SD15:1>", "suffix": "", "sampler": "LCM", "steps": 8, "cfg": 1.5, "strength": 0.3, "pose": 0.9,
     "seed": 1234, "background": "#808080", "first": 0, "last": None, "every": 1, "checkpoint": None,
+    "units": None,          # ControlNet units, {kind: {on, weight, start, end}} (see UNITS); None: the pose alone
+    "fill": None,           # {"amount": 0..1, "texture": path}: the figure filled with a texture before it is drawn
+    "look": None,           # a picture whose look IP-Adapter gives every frame (a scene may have its own)
 }
 
-# The backdrop is laid flat by Time Strata itself, so every stage asks for it to stay flat: a drawn floor or a
+# What each ControlNet unit sees and which model and preprocessor it takes (found among the ones installed).
+UNITS = {
+    "pose": {"on": True, "weight": 0.9, "start": 0.0, "end": 1.0},
+    "depth": {"on": False, "weight": 0.45, "start": 0.0, "end": 0.6},
+    "edges": {"on": False, "weight": 0.35, "start": 0.0, "end": 0.5},
+    "shape": {"on": False, "weight": 0.6, "start": 0.0, "end": 0.8},
+    "look": {"on": False, "weight": 0.6, "start": 0.0, "end": 1.0},
+}
+_KINDS = {
+    "pose": {"words": ("openpose",), "prefer": ("v11",), "modules": ("dw_openpose_full", "openpose_full", "openpose"), "sees": "motion"},
+    "depth": {"words": ("depth",), "prefer": ("v11",), "modules": ("depth_midas", "depth_anything", "depth_zoe", "depth_leres"), "sees": "motion"},
+    "edges": {"words": ("canny",), "prefer": ("v11",), "modules": ("canny",), "sees": "motion"},
+    "shape": {"words": ("qrcode", "qrmonster", "monster"), "prefer": ("v20", "v2"), "modules": ("None", "none"), "sees": "shape"},
+    "look": {"words": ("ip-adapter", "ipadapter", "ip_adapter"), "prefer": ("ip-adapter-plus_sd15", "plus"),
+             "modules": ("CLIP-ViT-H (IPAdapter)",), "sees": "look"},
+}
+_NOT_SD15 = ("sdxl", "_xl", "-xl", "xl_", "pulid", "faceid", "flux", "sd3")
+_VIDEO = (".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".gif")
+
+# The backdrop is laid flat by Time Strata itself, so every scene asks for it to stay flat: a drawn floor or a
 # shadow under the feet is cut as part of the figure in some frames and not in others, and in the stack that
 # turns into a grey band at the chain's feet (measured on the first real render: almost all the fog was in the
 # bottom eighth of the frames).
 BACKDROP_WORDS = "isolated on a plain flat grey background"
 NOT_A_ROOM = "floor, shadow, reflection, horizon line, gradient background, room, scenery"
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+_TAG = re.compile(r"<[^<>]+>")
 
 
 # --- Deforum, found and borrowed ----------------------------------------------------------------------------------
@@ -121,17 +151,108 @@ def last_settings():
     return {k: v for k, v in found.items() if v is not None}
 
 
+def _pick(names, kind):
+    """The installed ControlNet model for a unit (an SD 1.5 one), or None."""
+    spec = _KINDS[kind]
+    found = [n for n in names if any(w in n.lower().replace(" ", "") for w in spec["words"])
+             and not any(x in n.lower() for x in _NOT_SD15)]
+    found.sort(key=lambda n: (min([i for i, p in enumerate(spec["prefer"]) if p in n.lower()] or [len(spec["prefer"])]), len(n)))
+    return found[0] if found else None
+
+
 def available():
     try:
         from lib_controlnet import global_state
-        pose = [n for n in global_state.get_all_controlnet_names() if "openpose" in n.lower()]
-        pose.sort(key=lambda n: (0 if "v11" in n.lower() else 1, len(n)))
+        names = list(global_state.get_all_controlnet_names())
         modules = global_state.get_all_preprocessor_names() if hasattr(global_state, "get_all_preprocessor_names") else []
     except Exception:
-        pose, modules = [], []
-    preprocessor = next((m for m in ("dw_openpose_full", "openpose_full", "openpose") if m in modules), "openpose_full")
-    return {"deforum": bool(_deforum_dir()), "pose_model": pose[0] if pose else None, "pose_preprocessor": preprocessor,
-            "last": last_settings()}
+        names, modules = [], []
+    units = {}
+    for kind, spec in _KINDS.items():
+        # (Forge's ControlNet calls its "no preprocessor" None; the older extension called it none)
+        module = next((m for m in spec["modules"] if m in modules), spec["modules"][0])
+        units[kind] = {"model": _pick(names, kind), "module": module}
+    try:
+        from modules import sd_models, shared
+        checkpoints = sorted({info.name for info in sd_models.checkpoints_list.values()}, key=str.lower)
+        loaded = shared.opts.data.get("sd_model_checkpoint")
+    except Exception:
+        checkpoints, loaded = [], None
+    return {"deforum": bool(_deforum_dir()), "pose_model": units["pose"]["model"], "pose_preprocessor": units["pose"]["module"],
+            "units": units, "checkpoints": checkpoints, "checkpoint": loaded, "last": last_settings()}
+
+
+# --- scenes --------------------------------------------------------------------------------------------------------
+
+def scenes_of(options, seconds_of):
+    """The scenes as [{from (s), text, texture, look}], sorted. An older project's stages (`at`: a share of the
+    chain, 0..1, or above 1 a frame number) are read as scenes; `seconds_of(at)` turns a stage's place into
+    seconds. No scenes: the one prompt everywhere."""
+    scenes = [dict(s) for s in (options.get("scenes") or []) if str(s.get("text") or "").strip()]
+    if not scenes:
+        scenes = [{"from": seconds_of(float(s.get("at") or 0)), "text": s["text"]}
+                  for s in (options.get("stages") or []) if str(s.get("text") or "").strip()]
+    if not scenes:
+        scenes = [{"from": 0.0, "text": options.get("prompt") or "a person"}]
+    for s in scenes:
+        s["from"] = max(0.0, float(s.get("from") or 0))
+    scenes.sort(key=lambda s: s["from"])
+    scenes[0]["from"] = 0.0
+    return scenes
+
+
+def weights_at(scenes, t, blend):
+    """[(scene index, weight)] at second t: one scene, or two while one blends into the next (the blend is centred
+    on the next scene's start; smoothstep, so it starts and ends gently)."""
+    i = 0
+    while i + 1 < len(scenes) and scenes[i + 1]["from"] <= t:
+        i += 1
+    half = max(0.0, float(blend or 0)) / 2
+    if half > 0:
+        if i + 1 < len(scenes) and t > scenes[i + 1]["from"] - half:
+            f = (t - (scenes[i + 1]["from"] - half)) / (2 * half)
+            f = f * f * (3 - 2 * f)
+            return [(i, 1 - f), (i + 1, f)]
+        if i > 0 and t < scenes[i]["from"] + half:
+            f = (t - (scenes[i]["from"] - half)) / (2 * half)
+            f = f * f * (3 - 2 * f)
+            return [(i - 1, 1 - f), (i, f)]
+    return [(i, 1.0)]
+
+
+def _prompts(options, scenes, times):
+    """Deforum's prompt keyframes {frame: prompt} for the frames' seconds `times`: written where the prompt
+    changes, every frame of a blend. LoRA and other <tags> are taken out and said once (twice would load a LoRA
+    twice), and every prompt asks for the flat backdrop."""
+    tags, seen = [], set()
+    for text in [options.get("prefix"), options.get("suffix")] + [s["text"] for s in scenes]:
+        for tag in _TAG.findall(str(text or "")):
+            if tag not in seen:
+                seen.add(tag)
+                tags.append(tag)
+    prefix = _TAG.sub("", str(options.get("prefix") or "")).strip(" ,")
+    suffix = _TAG.sub("", str(options.get("suffix") or "")).strip(" ,")
+    negative = ", ".join(p for p in (str(options.get("negative") or "").strip(), NOT_A_ROOM) if p)
+
+    def words(scene):
+        text = _TAG.sub("", str(scene["text"] or "")).strip(" ,")
+        return ", ".join(p for p in (prefix, text, suffix, BACKDROP_WORDS) if p)
+
+    head = " ".join(tags)
+    keyed, last = {}, None
+    for n, t in enumerate(times):
+        mix = weights_at(scenes, t, options.get("blend"))
+        if len(mix) == 1 or mix[1][1] < 0.005:
+            body = words(scenes[mix[0][0]])
+        elif mix[0][1] < 0.005:
+            body = words(scenes[mix[1][0]])
+        else:
+            body = " AND ".join(f"{words(scenes[i])} :{w:.3f}" for i, w in mix)
+        prompt = f"{head} {body} --neg {negative}".strip()
+        if prompt != last:
+            keyed[str(n)] = prompt
+            last = prompt
+    return keyed
 
 
 # --- the motion clip ----------------------------------------------------------------------------------------------
@@ -145,9 +266,68 @@ def _up64(n):
     return int((int(n) + 63) // 64 * 64)
 
 
-def _motion(job, project, source, folder, options):
-    """The motion chain's frames on the backdrop, padded to Deforum's sizes, as a video; and each frame's
-    figure (its alpha, padded the same way) kept as the prior of the cut."""
+def _cover(rgb, W, H):
+    """A picture scaled to cover W x H and cut to it, from its middle."""
+    h, w = rgb.shape[:2]
+    s = max(W / w, H / h)
+    size = (max(W, int(round(w * s))), max(H, int(round(h * s))))
+    big = cv2.resize(np.ascontiguousarray(rgb[..., :3]), size, interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_CUBIC)
+    x, y = (size[0] - W) // 2, (size[1] - H) // 2
+    return big[y:y + H, x:x + W]
+
+
+class _Texture:
+    """A picture or a video a scene fills its figure with (or gives as its look), covering W x H. A video is
+    taken at the motion's own time (`at(seconds)`), so it stays in step with the motion also when only every
+    n-th frame is drawn, and it loops."""
+
+    def __init__(self, path, W, H):
+        self.W, self.H, self.capture, self.last, self.index = W, H, None, None, None
+        if os.path.splitext(path)[1].lower() in _VIDEO:
+            self.capture = cv2.VideoCapture(path)
+            if not self.capture.isOpened():
+                raise jobs.JobError(f"this video cannot be read: {os.path.basename(path)}")
+            self.fps = self.capture.get(cv2.CAP_PROP_FPS) or 24.0
+            self.count = max(1, int(self.capture.get(cv2.CAP_PROP_FRAME_COUNT) or 1))
+        else:
+            self.last = _cover(np.asarray(Image.open(path).convert("RGB")), W, H)
+
+    def at(self, seconds):
+        if self.capture is None:
+            return self.last
+        k = int(round(max(0.0, seconds) * self.fps)) % self.count
+        if k != self.index:
+            if self.index is None or k != self.index + 1:
+                self.capture.set(cv2.CAP_PROP_POS_FRAMES, k)          # (one after the other is read on, not sought)
+            ok, bgr = self.capture.read()
+            if ok:
+                self.last, self.index = _cover(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), self.W, self.H), k
+        return self.last if self.last is not None else np.full((self.H, self.W, 3), 128, np.uint8)
+
+    def close(self):
+        if self.capture is not None:
+            self.capture.release()
+
+
+def _fill(canvas, alpha, texture, amount):
+    """The figure filled with a texture, keeping its own light and shade (so Deforum still sees a body): the
+    texture is darkened and lightened by the figure's brightness around its mean, then mixed in by `amount`."""
+    photo = canvas.astype(np.float32)
+    a = alpha.astype(np.float32)[..., None] / 255.0
+    lum = photo @ np.float32([0.299, 0.587, 0.114])
+    inside = alpha >= 128
+    mean = float(lum[inside].mean()) if inside.any() else 128.0
+    shade = np.clip(lum / max(mean, 8.0), 0.45, 1.6)[..., None]
+    filled = np.clip(texture.astype(np.float32) * shade, 0, 255)
+    mixed = photo * (1 - amount) + filled * amount
+    return np.clip(photo * (1 - a) + mixed * a, 0, 255).astype(np.uint8)
+
+
+def _motion(job, project, source, folder, options, scenes, uses):
+    """The motion chain's frames on the backdrop, padded to Deforum's sizes, as videos: the motion itself (what
+    the pose, depth and edges are read from), the picture Deforum starts each frame from (the figure filled with
+    its scene's texture, when there is one), where it may paint, the silhouette and the look pictures. Each
+    frame's figure (its alpha, padded the same way) is kept as the prior of the cut."""
     record = store.read_chain(project, source)
     if not record or not record.get("make"):
         raise jobs.JobError("the motion chain has not been made yet")
@@ -163,17 +343,41 @@ def _motion(job, project, source, folder, options):
     prior_folder = os.path.join(folder, "prior")
     shutil.rmtree(prior_folder, ignore_errors=True)
     os.makedirs(prior_folder)
-    fps = float(record.get("fps") or 24) / max(1, int(options["every"] or 1))
+    record_fps = float(record.get("fps") or 24)
+    fps = record_fps / max(1, int(options["every"] or 1))
+    times = [k / record_fps for k in frames]
 
     def writer(path):
         command = [media.ffmpeg(), "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
                    "-s", f"{W}x{H}", "-r", f"{fps:.6f}", "-i", "-", "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p", path]
         return subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=_NO_WINDOW)
 
+    fill = options.get("fill") or {}
+    amount = float(fill.get("amount") or 0)
+    textures, looks = {}, {}
+
+    def texture_of(path, store_in):
+        if path not in store_in:
+            store_in[path] = _Texture(store.resolve(project, path), W, H)
+        return store_in[path]
+
+    scene_texture = [s.get("texture") or fill.get("texture") for s in scenes]
+    scene_look = [s.get("look") or options.get("look") for s in scenes]
+    # a scene's own texture or look plays from the scene's start; the one for every scene, at the motion's time
+    texture_from = [s["from"] if s.get("texture") else 0.0 for s in scenes]
+    look_from = [s["from"] if s.get("look") else 0.0 for s in scenes]
+    filling = amount > 0 and any(scene_texture)
+    looking = "look" in uses and any(scene_look)
+    paths = {"video": os.path.join(folder, "motion.mp4"), "mask": os.path.join(folder, "mask.mp4")}
+    if filling:
+        paths["init"] = os.path.join(folder, "init.mp4")
+    if "shape" in uses:
+        paths["shape"] = os.path.join(folder, "shape.mp4")
+    if looking:
+        paths["look"] = os.path.join(folder, "look.mp4")
+    processes = {key: writer(path) for key, path in paths.items()}
     # the motion, and where Deforum may paint: the motion figure grown a little (a skirt swings out, hair
     # flies); everything else keeps the flat backdrop exactly, so no floor or shadow can be drawn there
-    video, mask = os.path.join(folder, "motion.mp4"), os.path.join(folder, "mask.mp4")
-    processes = [writer(video), writer(mask)]
     grow = cut._disk(0.025 * H)
     source_folder = os.path.join(store.chain_dir(project, source), record["make"])
     try:
@@ -184,52 +388,79 @@ def _motion(job, project, source, folder, options):
             alpha = Image.new("L", (W, H), 0)
             alpha.paste(picture.split()[3], (left, top))
             alpha.save(os.path.join(prior_folder, f"{n:06d}.png"))
-            paint = cv2.dilate((np.asarray(alpha) >= 128).astype(np.uint8) * 255, grow)
-            processes[0].stdin.write(np.asarray(canvas).tobytes())
-            processes[1].stdin.write(np.repeat(paint[..., None], 3, axis=2).tobytes())
+            a = np.asarray(alpha)
+            paint = cv2.dilate((a >= 128).astype(np.uint8) * 255, grow)
+            motion_rgb = np.asarray(canvas)
+            processes["video"].stdin.write(motion_rgb.tobytes())
+            processes["mask"].stdin.write(np.repeat(paint[..., None], 3, axis=2).tobytes())
+            mix = weights_at(scenes, times[n], options.get("blend"))
+            shown = motion_rgb
+            if filling:
+                # the textures of the scenes this frame belongs to, crossfaded as their prompts are
+                pieces = [(texture_of(scene_texture[i], textures).at(times[n] - texture_from[i]), wgt) for i, wgt in mix if scene_texture[i] and wgt > 0]
+                if pieces:
+                    total = sum(wgt for _, wgt in pieces)
+                    texture = sum(t.astype(np.float32) * (wgt / total) for t, wgt in pieces)
+                    own = sum(wgt for i, wgt in mix if scene_texture[i])        # a scene without a texture keeps the photo
+                    shown = _fill(motion_rgb, a, texture, amount * own)
+                processes["init"].stdin.write(shown.tobytes())
+            if "shape" in processes:
+                shape = cv2.GaussianBlur((a >= 128).astype(np.float32) * 255, (0, 0), 1.5).astype(np.uint8)
+                processes["shape"].stdin.write(np.repeat(shape[..., None], 3, axis=2).tobytes())
+            if "look" in processes:
+                pieces = [(texture_of(scene_look[i], looks).at(times[n] - look_from[i]), wgt) for i, wgt in mix if scene_look[i] and wgt > 0]
+                if pieces:
+                    total = sum(wgt for _, wgt in pieces)
+                    look = sum(t.astype(np.float32) * (wgt / total) for t, wgt in pieces).astype(np.uint8)
+                else:
+                    look = np.full((H, W, 3), 128, np.uint8)
+                processes["look"].stdin.write(look.tobytes())
             if n % 10 == 0:
                 job.step(f"laying out the motion: frame {n + 1} of {len(frames)}", 0.01 + 0.04 * n / len(frames),
-                         jobs.preview_of(canvas))
+                         jobs.preview_of(Image.fromarray(shown)))
     finally:
-        for process in processes:
+        for texture in list(textures.values()) + list(looks.values()):
+            texture.close()
+        errors = []
+        for key, process in processes.items():
             process.stdin.close()
             error = process.stderr.read().decode("utf8", "replace")
             if process.wait() != 0:
-                raise jobs.JobError(f"the motion clip could not be written: {error[-300:]}")
-    return {"video": video, "mask": mask, "frames": len(frames), "width": W, "height": H, "fps": fps, "record": record}
+                errors.append(f"{key}: {error[-300:]}")
+        if errors:
+            raise jobs.JobError("the motion clip could not be written: " + "; ".join(errors))
+    return dict(paths, frames=len(frames), width=W, height=H, fps=fps, record=record, left=left, top=top, times=times,
+                init=paths.get("init", paths["video"]), looking=looking)
 
 
 # --- Deforum's settings ------------------------------------------------------------------------------------------
 
-def _prompts(options, count):
-    """The stages of the prompt as Deforum's keyframes: {frame: prompt}. A stage's `at` is a share of the chain
-    (0..1) or, above 1, a frame number."""
-    prefix = str(options.get("prefix") or "").strip()
-    negative = ", ".join(p for p in (str(options.get("negative") or "").strip(), NOT_A_ROOM) if p)
-
-    def full(text):
-        text = " ".join(p for p in (prefix, str(text or "").strip()) if p)
-        return f"{text}, {BACKDROP_WORDS} --neg {negative}"
-
-    stages = [s for s in (options.get("stages") or []) if str(s.get("text") or "").strip()]
-    if not stages:
-        return {"0": full(options.get("prompt") or "a person")}
-    keyed = {}
-    for stage in stages:
-        at = float(stage.get("at") or 0)
-        frame = int(round(at * (count - 1))) if at <= 1 else int(at)
-        keyed[str(max(0, min(count - 1, frame)))] = full(stage["text"])
-    if "0" not in keyed:
-        keyed["0"] = keyed[min(keyed, key=int)]
-    return dict(sorted(keyed.items(), key=lambda kv: int(kv[0])))
+def _units(options):
+    """The ControlNet units asked for: {kind: {on, weight, start, end}}, every kind present. Without units (an
+    older project) the pose alone, at the old `pose` weight."""
+    asked = options.get("units")
+    out = {}
+    for kind, default in UNITS.items():
+        unit = dict(default)
+        if isinstance(asked, dict) and isinstance(asked.get(kind), dict):
+            unit.update({k: v for k, v in asked[kind].items() if k in default and v is not None})
+        elif asked is None and kind == "pose":
+            unit["weight"] = float(options.get("pose") if options.get("pose") is not None else default["weight"])
+            unit["on"] = unit["weight"] > 0
+        unit["on"] = bool(unit["on"]) and float(unit["weight"]) > 0
+        unit["start"] = min(max(float(unit["start"]), 0.0), 1.0)
+        unit["end"] = min(max(float(unit["end"]), unit["start"]), 1.0)
+        out[kind] = unit
+    return out
 
 
-def settings(base, motion, options, outdir_name):
-    available_now = available()
-    pose_model = available_now["pose_model"]
+def settings(base, motion, options, outdir_name, scenes=None, units=None, found=None):
+    found = found or available()
+    scenes = scenes or scenes_of(options, lambda at: at)
+    units = units or _units(options)
     data = dict(base)
     data.update({
-        "animation_mode": "Video Input", "video_init_path": motion["video"], "extract_nth_frame": 1,
+        "animation_mode": "Video Input", "video_init_path": motion["init"], "extract_nth_frame": 1,
         "extract_from_frame": 0, "extract_to_frame": -1, "overwrite_extracted_frames": True,
         # only the figure's place is painted; the backdrop is put back as it was (white = paint)
         "use_mask_video": True, "video_mask_path": motion["mask"], "invert_mask": False, "overlay_mask": True,
@@ -241,34 +472,51 @@ def settings(base, motion, options, outdir_name):
         "enable_steps_scheduling": False, "cfg_scale_schedule": f"0: ({float(options['cfg'])})",
         "strength_schedule": f"0: ({float(options['strength'])})", "noise_schedule": "0: (0)",
         "color_coherence": "None", "diffusion_cadence": 1, "fps": max(1, int(round(motion["fps"]))),
-        "prompts": _prompts(options, motion["frames"]), "animation_prompts": "", "positive_prompts": "", "negative_prompts": "",
+        "prompts": _prompts(options, scenes, motion.get("times") or [n / max(1e-6, motion["fps"]) for n in range(motion["frames"])]),
+        "animation_prompts": "", "positive_prompts": "", "negative_prompts": "",
         "batch_name": outdir_name, "skip_video_creation": True, "make_gif": False, "frame_interpolation_engine": "None",
         "r_upscale_video": False, "store_frames_in_ram": False, "motion_preview_mode": False, "save_depth_maps": False,
         "use_init": False, "use_mask": True, "show_info_on_ui": False, "resume_from_timestring": False,     # (Deforum masks only with use_mask)
-        "enable_checkpoint_scheduling": False, "enable_clipskip_scheduling": False, "enable_subseed_scheduling": False,
+        "enable_clipskip_scheduling": False, "enable_subseed_scheduling": False,
         "enable_sampler_scheduling": False, "enable_perspective_flip": False, "anti_blur_amount_schedule": "0: (0)",
         "amount_schedule": "0: (0)", "zoom": "0: (1.0)", "angle": "0: (0)", "translation_x": "0: (0)", "translation_y": "0: (0)",
         "translation_z": "0: (0)", "rotation_3d_x": "0: (0)", "rotation_3d_y": "0: (0)", "rotation_3d_z": "0: (0)",
-        "cn_1_enabled": bool(pose_model and float(options["pose"]) > 0), "cn_1_module": available_now["pose_preprocessor"],
-        "cn_1_model": pose_model or "None", "cn_1_weight": f"0:({float(options['pose'])})", "cn_1_vid_path": motion["video"],
-        "cn_1_overwrite_frames": True, "cn_1_pixel_perfect": True, "cn_1_resize_mode": "Inner Fit (Scale to Fit)",
-        "cn_1_control_mode": "Balanced", "cn_1_guidance_start": "0:(0.0)", "cn_1_guidance_end": "0:(1.0)",
-        "cn_1_loopback_mode": False, "cn_1_low_vram": False,
     })
-    # every other unit, complete and off: Deforum reads the schedules of as many units as Forge is set up for
+    # another checkpoint than the one Forge has loaded: through Deforum's own checkpoint schedule (Forge's is put
+    # back when the job ends)
+    data["enable_checkpoint_scheduling"] = bool(options.get("checkpoint"))
+    if options.get("checkpoint"):
+        data["checkpoint_schedule"] = '0: ("' + str(options["checkpoint"]).replace('"', "") + '")'
+    # every unit Deforum knows, complete: Deforum reads the schedules of as many units as Forge is set up for
     # (6 on this Forge), and a unit its settings file does not name comes in with empty schedules and stops it
     try:
         from modules import shared
-        units = int(shared.opts.data.get("control_net_unit_count", shared.opts.data.get("control_net_max_models_num", 5)) or 5)
+        count = int(shared.opts.data.get("control_net_unit_count", shared.opts.data.get("control_net_max_models_num", 5)) or 5)
     except Exception:
-        units = 5
+        count = 5
     off = {"enabled": False, "module": "none", "model": "None", "weight": "0:(1)", "guidance_start": "0:(0.0)",
            "guidance_end": "0:(1.0)", "vid_path": "", "mask_vid_path": "", "overwrite_frames": True, "low_vram": False,
            "pixel_perfect": False, "processor_res": 64, "threshold_a": 64, "threshold_b": 64,
            "resize_mode": "Inner Fit (Scale to Fit)", "control_mode": "Balanced", "loopback_mode": False}
-    for n in range(2, max(5, units) + 1):
+    for n in range(1, max(5, count) + 1):
         for key, value in off.items():
             data[f"cn_{n}_{key}"] = value
+    sees = {"motion": motion["video"], "shape": motion.get("shape"), "look": motion.get("look") if motion.get("looking") else None}
+    slot = 0
+    for kind in ("pose", "depth", "edges", "shape", "look"):
+        unit, model = units[kind], found["units"][kind]["model"]
+        path = sees[_KINDS[kind]["sees"]]
+        if not unit["on"] or not model or not path or slot >= max(5, count):
+            continue
+        slot += 1
+        data.update({
+            f"cn_{slot}_enabled": True, f"cn_{slot}_module": found["units"][kind]["module"], f"cn_{slot}_model": model,
+            f"cn_{slot}_weight": f"0:({float(unit['weight'])})", f"cn_{slot}_vid_path": path,
+            f"cn_{slot}_guidance_start": f"0:({float(unit['start'])})", f"cn_{slot}_guidance_end": f"0:({float(unit['end'])})",
+            f"cn_{slot}_pixel_perfect": kind in ("pose", "depth", "edges"),
+            f"cn_{slot}_processor_res": 512, f"cn_{slot}_threshold_a": 100 if kind == "edges" else 64,
+            f"cn_{slot}_threshold_b": 200 if kind == "edges" else 64,
+        })
     return data
 
 
@@ -321,6 +569,75 @@ def _watch(job, done, total):
         done.wait(0.5)
 
 
+def drawn_frames(outdir):
+    """Deforum's drawn frames in a folder, in order (not its depth maps)."""
+    return sorted(p for p in glob.glob(os.path.join(outdir, "*.png")) if "_depth_" not in os.path.basename(p))
+
+
+def live_frame(drawn, prior, motion, background):
+    """One frame Deforum drew, cut by the backdrop's colour where the motion frame stands (RGBA, the motion
+    chain's frame size). A quick cut, for showing the chain grow; the chain's real cut comes after."""
+    record = motion["record"]
+    w, h, left, top = record["width"], record["height"], motion["left"], motion["top"]
+    piece = np.ascontiguousarray(drawn[top:top + h, left:left + w, :3])
+    if prior is not None:
+        prior = prior[top:top + h, left:left + w]
+    colour = [float(c) for c in _hex(background)]
+    options = chain._options({"options": {"prior_reach": 0.012}})
+    alpha = chain._alpha_of(piece, {"matte": "key", "key_colour": colour}, options, prior)
+    return cut.render_frame(piece, alpha, (1.0, 0.0, 0.0), w, h, colour)
+
+
+def _live(job, outdir, motion, folder, options, done):
+    """Every frame Deforum has drawn, shown at once: cut and written where the page reads the chain's live
+    frames, while Deforum goes on drawing."""
+    live = os.path.join(folder, "live")
+    shutil.rmtree(live, ignore_errors=True)
+    os.makedirs(live)
+    record = motion["record"]
+    job.live = {"frames": 0, "total": motion["frames"], "width": record["width"], "height": record["height"],
+                "fps": motion["fps"], "path": f"chains/{os.path.basename(folder)}/live"}
+    prior_folder = os.path.join(folder, "prior")
+    made = 0
+    while True:
+        finished = done.is_set()
+        try:
+            # a frame still being written is left for the next look
+            ready = [p for p in drawn_frames(outdir) if finished or time.time() - os.path.getmtime(p) > 0.4]
+        except OSError:
+            ready = []
+        while made < min(len(ready), motion["frames"]):
+            try:
+                drawn = np.asarray(Image.open(ready[made]).convert("RGB"))
+                prior_path = os.path.join(prior_folder, f"{made:06d}.png")
+                prior = np.asarray(Image.open(prior_path).convert("L"), np.float32) / 255.0 if os.path.isfile(prior_path) else None
+                placed = live_frame(drawn, prior, motion, options["background"])
+                Image.fromarray(placed, "RGBA").save(os.path.join(live, f"{made:06d}.webp"), "WEBP", quality=88, alpha_quality=100, method=1)
+            except Exception as e:          # (shown later by the real cut; the live view only skips it)
+                print(f"[Time Strata] live frame {made}: {e}")
+                if not finished:
+                    break
+            made += 1
+            job.live["frames"] = made
+        if finished:
+            return
+        done.wait(0.5)
+
+
+def _put_back_checkpoint(title):
+    """Forge's own checkpoint again, after a job that drew with another one."""
+    try:
+        from modules import sd_models, shared
+        if not title or shared.opts.data.get("sd_model_checkpoint") == title:
+            return
+        info = sd_models.get_closet_checkpoint_match(title)
+        if info is not None:
+            sd_models.reload_model_weights(info=info)
+            shared.opts.data["sd_model_checkpoint"] = title
+    except Exception as e:
+        print(f"[Time Strata] Forge's checkpoint could not be put back ({e}); choose it again in Forge")
+
+
 @jobs.handler("deforum")
 def generate(job):
     """params: project, source (the motion chain), chain (the new chain), options (see DEFAULTS)"""
@@ -334,13 +651,24 @@ def generate(job):
     options.update({k: v for k, v in (params.get("options") or {}).items() if k in DEFAULTS and v is not None})
     deforum_folder = _ensure_paths()
     folder = store.chain_dir(project, target, create=True)
+    record = store.read_chain(project, source) or {}
+    count = int(record.get("frames") or 2)
+    record_fps = float(record.get("fps") or 24)
+    # an older project's stage `at`: a share of the chain (0..1) or a frame number
+    scenes = scenes_of(options, lambda at: (at * (count - 1) if at <= 1 else at) / record_fps)
+    units = _units(options)
+    found = available()
+    for kind, unit in units.items():
+        if unit["on"] and not found["units"][kind]["model"]:
+            print(f"[Time Strata] no ControlNet model for '{kind}' was found: that unit is left out")
+    uses = {kind for kind, unit in units.items() if unit["on"] and found["units"][kind]["model"]}
 
-    motion = _motion(job, project, source, folder, options)
+    motion = _motion(job, project, source, folder, options, scenes, uses)
     out_root = os.path.join(folder, "deforum")
     shutil.rmtree(out_root, ignore_errors=True)
     os.makedirs(out_root)
     name = f"TimeStrata_{target}"
-    data = settings(_base_settings(deforum_folder), motion, options, name)
+    data = settings(_base_settings(deforum_folder), motion, options, name, scenes, units, found)
     settings_path = os.path.join(folder, "deforum_settings.json")
     with open(settings_path, "w", encoding="utf8") as file:
         json.dump(data, file, ensure_ascii=False, indent=1)
@@ -356,16 +684,22 @@ def generate(job):
     job.step("waiting for Forge (another drawing may be running)", 0.05)
     done = threading.Event()
     watcher = threading.Thread(target=_watch, args=(job, done, motion["frames"]), daemon=True)
+    shower = threading.Thread(target=_live, args=(job, os.path.join(out_root, name), motion, folder, options, done), daemon=True)
     with queue_lock:
         if job.cancel_asked:
             raise jobs.Cancelled()
         watcher.start()
+        shower.start()
+        loaded = shared.opts.data.get("sd_model_checkpoint")
         try:
             with _WithoutDeforumation():
                 deforum_api.run_deforum_batch(batch_id, [job_id], [_File(settings_path)], {"outdir_samples": out_root})
         finally:
             done.set()
             watcher.join(timeout=5)
+            shower.join(timeout=60)
+            if options.get("checkpoint"):
+                _put_back_checkpoint(loaded)
     if job.cancel_asked or shared.state.interrupted:
         raise jobs.Cancelled()
     status = tracker.get(job_id)
@@ -397,7 +731,7 @@ def generate(job):
 
     record = motion["record"]
     cut_options = chain._options({"options": {
-        "matte": "key", "key_colour": str(options["background"]), "height": record["height"],
+        "matte": "keymodel", "key_colour": str(options["background"]), "height": record["height"],
         "align": "centre", "scale": "steady", "figure": (record.get("options") or {}).get("figure", 0.84),
         "baseline": (record.get("options") or {}).get("baseline", 0.95), "max_frames": len(drawn),
         "prior_reach": 0.012,       # the drawn figure follows the motion closely (its pose and its picture)
@@ -406,5 +740,6 @@ def generate(job):
                          {"kind": "pictures", "path": f"chains/{target}/source", "fps": motion["fps"]},
                          cut_options, priors=priors,
                          extra={"deforum": {"from": source, "options": options, "settings": "deforum_settings.json"}})
+    shutil.rmtree(os.path.join(folder, "live"), ignore_errors=True)
     result["from"] = source
     return result

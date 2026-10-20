@@ -37,7 +37,57 @@
     const SPINE_DEFAULTS = {
         shape: 'arc', x: 0, z: 0, y: 0, heading: 0, length: null, spacing: 0.03, bend: 35, rise: 0, rise_from: 0.35,
         radius: 4, turns: 1, climb: 3, twist: 0, tilt: true, points: [],
+        steer: [], steer_scale: 1, steer_smooth: 0,
     };
+
+    /* A steered spine: how the trail turned and climbed at its frames, recorded while steering (keys, a joystick,
+     * DeforumationQT) as [frame, turn (degrees per frame, + to the right), climb (degrees of slope, + up)], only
+     * where it changed. Between entries it goes from one to the next; before the first and after the last it
+     * holds. -> a function frame -> [turn, climb], with the steering strength and smoothing applied. */
+    function steering(sp) {
+        const list = (sp.steer || []).filter(e => Array.isArray(e) && e.length >= 3 && isFinite(e[0])).slice().sort((a, b) => a[0] - b[0]);
+        const scale = sp.steer_scale == null ? 1 : +sp.steer_scale;
+        const raw = (k, i) => {
+            if (!list.length) return 0;
+            if (k <= list[0][0]) return +list[0][i] || 0;
+            if (k >= list[list.length - 1][0]) return +list[list.length - 1][i] || 0;
+            // (a steered trail has a mark every frame while it is steered: found by halving)
+            let lo = 0, hi = list.length - 1;
+            while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (list[mid][0] <= k) lo = mid; else hi = mid; }
+            const a = list[lo], b = list[hi], f = (k - a[0]) / Math.max(1e-9, b[0] - a[0]);
+            return lerp(+a[i] || 0, +b[i] || 0, f);
+        };
+        const reach = Math.max(0, Math.round(+sp.steer_smooth || 0));
+        return k => {
+            if (!reach) return [raw(k, 1) * scale, raw(k, 2) * scale];
+            let t = 0, c = 0, n = 0;
+            for (let o = -reach; o <= reach; o++) { t += raw(k + o, 1); c += raw(k + o, 2); n++; }
+            return [t / n * scale, c / n * scale];
+        };
+    }
+
+    /* Steering marks with only the ones the line between their neighbours does not already say (within
+     * `turnTol` degrees a frame and `climbTol` degrees): a mark a frame while steering becomes a few marks
+     * where the steering changed. The first and the last mark always stay. */
+    function compressSteer(list, turnTol, climbTol) {
+        const marks = (list || []).filter(e => Array.isArray(e) && e.length >= 3).slice().sort((a, b) => a[0] - b[0]);
+        if (marks.length <= 2) return marks;
+        turnTol = turnTol == null ? 0.002 : turnTol; climbTol = climbTol == null ? 0.05 : climbTol;
+        const out = [marks[0]];
+        let anchor = 0;
+        for (let i = 1; i < marks.length - 1; i++) {
+            // can every mark from the anchor to the next one be read off the straight line between them?
+            const a = marks[anchor], b = marks[i + 1];
+            let fits = true;
+            for (let j = anchor + 1; j <= i && fits; j++) {
+                const f = (marks[j][0] - a[0]) / Math.max(1e-9, b[0] - a[0]);
+                fits = Math.abs(lerp(a[1], b[1], f) - marks[j][1]) <= turnTol && Math.abs(lerp(a[2], b[2], f) - marks[j][2]) <= climbTol;
+            }
+            if (!fits) { out.push(marks[i]); anchor = i; }
+        }
+        out.push(marks[marks.length - 1]);
+        return out;
+    }
 
     /* the spine's centre line as points every `step` metres of horizontal travel, from a description */
     function centreLine(spine, length, step) {
@@ -69,6 +119,21 @@
                 const from = mul(right, -sp.radius);
                 const flat = add(mul(from, Math.cos(a)), mul(mul(d0, sp.radius), Math.sin(a)));
                 points.push([centre[0] + flat[0], sp.y + sp.climb * f * Math.max(1, length / around), centre[2] + flat[2]]);
+            }
+            return points;
+        }
+        if (sp.shape === 'steered') {
+            // one step a frame, each turned and sloped as it was steered at that frame
+            const per = Math.max(1e-3, +sp.spacing || SPINE_DEFAULTS.spacing), steer = steering(sp);
+            const frames = Math.max(2, Math.ceil(length / per));
+            let p = start.slice(), angle = sp.heading;
+            points.push(p.slice());
+            for (let k = 1; k <= frames; k++) {
+                const [turn, climb] = steer(k);
+                angle += turn;
+                const d = heading(angle - turn / 2), slope = rad(clamp(climb, -80, 80));
+                p = [p[0] + d[0] * per * Math.cos(slope), p[1] + per * Math.sin(slope), p[2] + d[2] * per * Math.cos(slope)];
+                points.push(p.slice());
             }
             return points;
         }
@@ -288,6 +353,84 @@
         return { eye, target, up, fov: v.fov, forward, values: v };
     }
 
+    /* ---- the follow camera -----------------------------------------------------------------------------------
+     * A camera that keeps a figure on a trail in view the way a camera operator would, set by what the picture
+     * should show instead of by coordinates:
+     *   yaw        the angle around the figure, degrees: 0 in front of its face, 90 at its left, 180 behind it
+     *   elevation  degrees above the figure's own horizon
+     *   fill       how much of the picture's height the figure takes (0.55: from knees-ish room to full body)
+     *   aim        where on the figure the camera looks, as a share of its height from the feet
+     *   lead       metres along the trail's way on that the camera looks past the figure (shows where it goes)
+     *   smooth     metres of trail whose direction is averaged, so a sharp turn becomes a calm swing
+     *   along      where on the chain the figure is when the chain has no present (metres)
+     * The distance follows from the lens and the figure's size, so the proportions stay right whatever the lens. */
+    const FOLLOW_FIELDS = { yaw: 20, elevation: 6, fill: 0.55, aim: 0.55, lead: 0.6, smooth: 1.5, along: 0, fov: 50, roll: 0 };
+
+    function followAt(keys, path, t, place) {
+        const v = {};
+        for (const [field, fallback] of Object.entries(FOLLOW_FIELDS)) v[field] = track(keys, field, t, fallback);
+        const s = place.s != null ? place.s : v.along;
+        const size = place.size || 1.7, faces = place.faces === 'end' ? 1 : -1;
+        const here = pointAt(path, s);
+        // the trail's direction around the figure, averaged over `smooth` metres (mostly behind it, a little ahead)
+        // (sampled every 5 cm with a triangular weight: a corner passing a coarse sample made the camera lurch)
+        let avg = [0, 0, 0];
+        const reach = Math.max(0, v.smooth), span = reach * 1.5;
+        const steps = Math.max(2, Math.min(240, Math.ceil(span / 0.05)));
+        for (let i = 0; i <= steps; i++) {
+            const f = i / steps, weight = 1 - Math.abs(2 * f - 1) + 1e-3;
+            avg = add(avg, mul(pointAt(path, s - reach + span * f).t, weight));
+        }
+        const way = len(avg) > 1e-6 ? norm(avg) : here.t;
+        // the figure's own up (it leans with the spine), made square to that direction
+        let up = sub(here.u, mul(way, dot(here.u, way)));
+        up = len(up) > 1e-4 ? norm(up) : UP;
+        const aimPoint = add(here.p, mul(up, size * (v.aim - 0.05)));            // (the feet are a little below the spine point)
+        // from the figure towards the camera: its face's direction, turned by yaw about its up and raised by elevation
+        const face = mul(way, faces);
+        let toward = rotate(face, up, rad(v.yaw));
+        const side = norm(cross(toward, up));
+        toward = rotate(toward, side, rad(v.elevation));
+        const distance = size / (Math.max(0.05, v.fill) * 2 * Math.tan(rad(v.fov) / 2));
+        const eye = add(aimPoint, mul(toward, distance));
+        let target = add(aimPoint, mul(way, -faces * v.lead));                    // past the figure, where its trail goes
+        // looking ahead never takes the figure out of the picture: seen from an angle (and in an upright picture,
+        // whose width is narrow) the look ahead is shortened so the figure stays within the inner 40% of the
+        // narrower half of the picture
+        const half = Math.atan(Math.tan(rad(v.fov) / 2) * Math.min(1, place.aspect || 1));
+        const toFigure = norm(sub(aimPoint, eye)), toTarget = norm(sub(target, eye));
+        const apart = Math.acos(clamp(dot(toFigure, toTarget), -1, 1)), most = 0.4 * half;
+        if (apart > most) {
+            // the point along the same line whose direction from the eye is `most` away from the figure's
+            let lo = 0, hi = 1;
+            for (let i = 0; i < 24; i++) {
+                const mid = (lo + hi) / 2, p = add(aimPoint, mul(sub(target, aimPoint), mid));
+                if (Math.acos(clamp(dot(toFigure, norm(sub(p, eye))), -1, 1)) > most) hi = mid; else lo = mid;
+            }
+            target = add(aimPoint, mul(sub(target, aimPoint), lo));
+        }
+        const forward = norm(sub(target, eye));
+        let camUp = sub(up, mul(forward, dot(up, forward)));
+        if (len(camUp) < 1e-4) camUp = sub(UP, mul(forward, dot(UP, forward)));
+        camUp = rotate(norm(camUp), forward, rad(v.roll));
+        return { eye, target, up: camUp, fov: v.fov, forward, values: v, distance };
+    }
+
+    /* follow keys a ready-made move gives, over `duration` seconds */
+    function followPreset(name, duration) {
+        const D = duration;
+        switch (name) {
+            case 'side': return [{ t: 0, yaw: 80, elevation: 4, fill: 0.5, aim: 0.55, lead: 0.4, smooth: 1.5, fov: 45 }];
+            case 'behind': return [{ t: 0, yaw: 160, elevation: 12, fill: 0.45, aim: 0.6, lead: 1.5, smooth: 2, fov: 55 }];
+            case 'close': return [{ t: 0, yaw: 15, elevation: 3, fill: 0.85, aim: 0.65, lead: 0.2, smooth: 1, fov: 40 }];
+            case 'orbit': return [0, 0.25, 0.5, 0.75, 1].map((f, i) => ({ t: D * f, yaw: 20 + 360 * f, elevation: 6 + 6 * Math.sin(i), fill: 0.5, aim: 0.55, lead: 0.5, smooth: 1.5, fov: 48 }));
+            case 'reveal': return [{ t: 0, yaw: 10, elevation: 4, fill: 0.8, aim: 0.6, lead: 0.3, smooth: 1.5, fov: 45 },
+                                   { t: D, yaw: 55, elevation: 35, fill: 0.22, aim: 0.5, lead: 2.5, smooth: 3, fov: 55 }];
+            case 'front':
+            default: return [{ t: 0, yaw: 20, elevation: 6, fill: 0.55, aim: 0.55, lead: 0.6, smooth: 1.5, fov: 50 }];
+        }
+    }
+
     /* the place on a path nearest to a point: s (searched coarsely, then finely) */
     function nearestS(path, point, from, to) {
         from = from == null ? -10 : from; to = to == null ? path.length + 10 : to;
@@ -430,6 +573,7 @@
         SPINE_DEFAULTS, CHAIN_DEFAULTS, CAMERA_FIELDS, TIME_DEFAULTS, RIDING,
         centreLine, spinePath, pointAt, cardSize, chainCards, chainLength, presentAt, presence, presentS,
         track, cameraAt, nearestS, keyFromView, knifeAt, preset, plan, passRates, lookAt, perspective, multiply,
+        steering, compressSteer, FOLLOW_FIELDS, followAt, followPreset,
     };
     if (typeof module !== 'undefined' && module.exports) module.exports = Core;
     else root.StrataCore = Core;

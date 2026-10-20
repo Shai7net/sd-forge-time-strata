@@ -367,8 +367,16 @@ def clean_alpha(alpha, low=0.06, high=0.94, keep_parts=0.03, holes=0.0006, reach
         return np.zeros_like(a)
     areas = stats[1:, cv2.CC_STAT_AREA]
     kept = 1 + np.nonzero(areas >= keep_parts * areas.max())[0]
+    main = 1 + int(np.argmax(areas))
+    known = np.zeros(0, int)
+    if prior is not None:
+        # where the figure is known to be decides which part is the figure: a big rock it throws is not, and the
+        # parts lying mostly on it always stay (a thin figure beside a larger rock was taken for a stray part)
+        on = np.bincount(labels[prior >= 0.5].ravel(), minlength=count)[1:]
+        if on.max() > 0:
+            main = 1 + int(np.argmax(on))
+            known = 1 + np.nonzero(on >= 0.3 * areas)[0]
     if floating and len(kept) > 1:
-        main = 1 + int(np.argmax(areas))
         top, bottom = stats[main, cv2.CC_STAT_TOP], stats[main, cv2.CC_STAT_TOP] + stats[main, cv2.CC_STAT_HEIGHT]
         beside = []
         for n in kept:
@@ -377,6 +385,7 @@ def clean_alpha(alpha, low=0.06, high=0.94, keep_parts=0.03, holes=0.0006, reach
             if n == main or overlap >= floating * bh:
                 beside.append(n)
         kept = np.array(beside)
+    kept = np.union1d(kept, known)
     solid = np.isin(labels, kept).astype(np.uint8)
     a *= cv2.dilate(solid, _disk(max(2.0, reach * h))).astype(np.float32)
     if holes > 0:

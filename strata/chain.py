@@ -5,6 +5,7 @@ them out again: the first cuts every frame and keeps its alpha and its measures,
 frame in the chain's frame and writes it.
 """
 
+import itertools
 import os
 import time
 
@@ -16,7 +17,7 @@ from . import cut, jobs, media, store
 
 DEFAULTS = {
     "start": 0.0, "end": None, "fps": None, "max_frames": 600, "max_side": 1280,
-    "matte": "auto", "model": None, "key_colour": None, "key_near": 9.0, "key_far": 26.0,
+    "matte": "auto", "model": None, "key_colour": None, "key_near": 9.0, "key_far": 26.0, "crop": "auto",
     "low": 0.06, "high": 0.94, "keep_parts": 0.03, "holes": 0.0006, "prior_reach": 0.03,
     "align": "centre", "scale": "steady", "baseline": 0.95, "figure": 0.84, "smooth": 3.0, "ground": 12,
     "height": 768, "width": None,
@@ -36,9 +37,11 @@ def _frames(project, source, options):
         path = store.resolve(project, source["path"])
         total = media.count_video(path, options["start"], options["end"], options["fps"])
         count = min(total, int(options["max_frames"] or total))
+        # black bars around the picture would be taken for its backdrop (an upright video of a wide film)
+        crop = media.find_letterbox(path, options["start"], options["end"]) if options.get("crop", "auto") == "auto" else None
 
         def again():
-            for n, frame in enumerate(media.read_video(path, options["start"], options["end"], options["fps"], options["max_side"])):
+            for n, frame in enumerate(media.read_video(path, options["start"], options["end"], options["fps"], options["max_side"], crop)):
                 if n >= count:
                     break
                 yield frame
@@ -57,13 +60,22 @@ def _frames(project, source, options):
     raise jobs.JobError(f"unknown source: {kind}")
 
 
-def _decide(first, options, video=False):
-    """How the background is taken away, decided on the first frame when the user left it to us: the frame's own
-    transparency, a flat backdrop's colour, or the best picture model here. The video model (RVM) is ten times
-    faster but only on request: on a white dress before a white curtain it left holes in the dress and kept
-    pieces of the curtain, where BiRefNet-lite cut it clean, with less fog and less flicker (measured 2026-10-18)."""
+LOOK_AHEAD = 48         # frames the background is judged on (two seconds): a first frame alone may be a black fade-in
+
+
+def _decide(frames, options, video=False):
+    """How the background is taken away, decided on the first frames when the user left it to us: the frames'
+    own transparency, a flat backdrop's colour, or the best picture model here. A flat backdrop must be flat in
+    every frame that shows something (a dark fade-in looked like one and the whole picture was kept). The video
+    model (RVM) is ten times faster but only on request: on a white dress before a white curtain it left holes
+    in the dress and kept pieces of the curtain, where BiRefNet-lite cut it clean, with less fog and less flicker
+    (measured 2026-10-18)."""
+    frames = frames if isinstance(frames, (list, tuple)) else [frames]
+    first = frames[0]
     matte = options["matte"]
-    colour, spread = cut.border_colour(first)
+    seen = [(cut.border_colour(f), float(f[..., :3].mean())) for f in frames[::4]]
+    lit = [(colour, spread) for (colour, spread), bright in seen if bright > 14] or [seen[0][0]]
+    colour, spread = max(lit, key=lambda pair: pair[1])       # the busiest border of the frames that show something
     if matte == "auto":
         if cut.has_alpha(first):
             matte = "alpha"
@@ -71,12 +83,12 @@ def _decide(first, options, video=False):
             matte = "key"
         else:
             matte = "model"
-    if matte == "key" and options["key_colour"]:
+    if matte in ("key", "keymodel") and options["key_colour"]:
         text = str(options["key_colour"]).lstrip("#")
         colour = np.array([int(text[i:i + 2], 16) for i in (0, 2, 4)], np.float32)
     if matte == "rvm":
         model = options["model"] if options["model"] in cut.RVM_FILES else "rvm"
-    elif matte == "model":
+    elif matte in ("model", "keymodel"):
         model = options["model"] if options["model"] in cut.REMBG_MODELS else cut.best_ready_model()
     else:
         model = None
@@ -89,6 +101,11 @@ def _alpha_of(frame, decided, options, prior=None, matter=None):
         raw = frame[..., 3].astype(np.float32) / 255.0
     elif matte == "key":
         raw = cut.key_matte(frame, decided["key_colour"], options["key_near"], options["key_far"])
+    elif matte == "keymodel":
+        # a figure drawn on a known flat backdrop: the key says what differs from the backdrop, the model what is
+        # a figure; together they keep a see-through figure (water, mist) whole where the key alone left holes
+        raw = np.maximum(cut.key_matte(frame, decided["key_colour"], options["key_near"], options["key_far"]),
+                         cut.model_matte(frame, decided["model"]))
     elif matte == "rvm":
         raw = matter(frame)
     else:
@@ -125,7 +142,9 @@ def _cut_pass(job, project, chain_id, count, frames, options, priors=None, video
         for attempt in range(3):
             try:
                 measures, decided = _cut_frames(job, folder, count, frames, options, priors, video, [], time.time(), override)
-                return _steady_suspects(job, folder, measures), decided
+                # (frames drawn over a known figure need no steadying from their neighbours: the figure they were
+                # drawn over already says where it is, and drawn frames far apart in time are not alike)
+                return (measures if priors else _steady_suspects(job, folder, measures)), decided
             except cut.NoRoom as e:
                 # never a chain cut half with one model and half with another: start again from its first frame
                 cut.release_models()
@@ -145,16 +164,22 @@ def _cut_pass(job, project, chain_id, count, frames, options, priors=None, video
 
 def _cut_frames(job, folder, count, frames, options, priors, video, measures, started, override=None):
     decided, matter = None, None
-    for n, frame in enumerate(frames()):
+    source = iter(frames())
+    ahead = list(itertools.islice(source, LOOK_AHEAD))
+    for n, frame in enumerate(itertools.chain(ahead, source)):
         if decided is None:
-            decided = _decide(frame, options, video)
-            if override:
+            decided = _decide(ahead, options, video)
+            ahead = None
+            if override and decided["matte"] == "keymodel":
+                # (the backdrop's key stays; only the model is a smaller one)
+                decided.update(model="u2net", fallback=override["fallback"].replace("rvm", "u2net"))
+            elif override:
                 decided.update(override)
-            if decided["matte"] in ("rvm", "model"):
+            if decided["matte"] in ("rvm", "model", "keymodel"):
                 cut.free_graphics_memory()
             if decided["matte"] == "rvm":
                 matter = cut.VideoMatter(decided["model"])
-            elif decided["matte"] == "model":
+            elif decided["matte"] in ("model", "keymodel"):
                 cut.prepare_model(decided["model"], job.step)
             job.step(f"cutting out with {decided['model'] or decided['matte']}", 0.04)
         prior = priors(n, frame.shape[:2]) if priors else None
@@ -215,7 +240,7 @@ def _place_pass(job, project, chain_id, frames, measures, decided, options):
                                      out_w=options["width"], bad=bad)
     height = int(options["height"])
     make, out_folder = store.next_make(project, chain_id)
-    background = decided["key_colour"] if decided["matte"] == "key" else None
+    background = decided["key_colour"] if decided["matte"] in ("key", "keymodel") else None
     count = len(measures)
     figure_heights = []
     for n, frame in enumerate(frames()):

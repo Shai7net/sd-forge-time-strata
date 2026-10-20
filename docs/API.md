@@ -103,7 +103,8 @@ All names below are relative to `/time-strata/`. POST bodies are JSON unless not
 | Method and route | Parameters / purpose |
 | --- | --- |
 | `GET options` | Version, data locations, matting models and export kinds |
-| `GET deforum/options` | Deforum presence, available pose assets and last generation settings |
+| `GET deforum/options` | Deforum presence, the ControlNet model and preprocessor found for each unit (`pose`, `depth`, `edges`, `shape`, `look`), the checkpoints, the loaded one and the last generation settings |
+| `GET dqt` | DeforumationQT's mediator, read only: `{running, values: {translation_x, translation_y, translation_z, rotation_x, rotation_y, fov}}` |
 | `GET projects` | Project list |
 | `GET project?name=...` | Read the scene document |
 | `POST project/create` | `{name}` |
@@ -126,7 +127,9 @@ All names below are relative to `/time-strata/`. POST bodies are JSON unless not
 | `GET sim360/thumb/{project}/{world}/{name}` | World preview |
 | `POST sim360/take` | `{project, from_project, world, file}`; copy a panorama |
 
-URL-encode query values and path segments. Job states are `waiting`, `running`, `done`, `failed` and `cancelled`. Jobs are in memory, survive only for the current server process and retain up to 30 recent records subject to active jobs.
+URL-encode query values and path segments. Job states are `waiting`, `running`, `done`, `failed` and `cancelled`. A running `deforum` job also reports `live: {frames, total, width, height, fps, path}`: the frames Deforum has drawn so far, already cut, at `file/{project}/{path}/{000000}.webp`.
+
+A `deforum` job's `options` may hold `scenes` (`[{from, text, texture, look}]`, seconds of the motion; `texture` and `look` are project paths), `blend` (seconds), `prefix`, `suffix`, `negative`, `fill` (`{amount, texture}`), `look`, `units` (`{pose|depth|edges|shape|look: {on, weight, start, end}}`), `checkpoint`, `sampler`, `steps`, `cfg`, `strength`, `seed`, `background`, `first`, `last` and `every`. Jobs are in memory, survive only for the current server process and retain up to 30 recent records subject to active jobs.
 
 ## Recording protocol
 
