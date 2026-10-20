@@ -416,7 +416,15 @@
             const how = T({ model: 'a model', rvm: 'a model', key: 'a flat colour', keymodel: 'a flat colour and a model', alpha: 'its own transparency' }[method.matte] || '-') + (method.model ? ` (${method.model})` : '');
             put(body, note('{0} frames, {1}x{2}, {3} a second. Background: {4}.', c.frames, c.width, c.height, fmt(c.fps, 1), how),
                         method.fallback ? h('div', { class: 'ts-warn' }, T('Not enough graphics memory for the best model: {0}. Close what else uses the graphics card and cut it out again for the best cut.', method.fallback)) : null,
-                        suspects ? h('div', { class: 'ts-warn' }, T('{0} frames look wrongly cut: {1}', suspects, c.suspects.slice(0, 12).join(', ') + (suspects > 12 ? '…' : ''))) : null);
+                        suspects ? h('div', { class: 'ts-warn' }, T('{0} frames look wrongly cut: {1}', suspects, c.suspects.slice(0, 12).join(', ') + (suspects > 12 ? '…' : '')),
+                                     c.generated ? ' ' : null,
+                                     c.generated ? button('Draw them again', () => {
+                                         // to the Generate tab, with these frames ready to be drawn again
+                                         const G = E.doc.generate = E.doc.generate || {};
+                                         G.source = c.generated.from; G.target = c.id;
+                                         UI.redrawText = c.suspects.join(', ');
+                                         UI.tab = 'generate'; renderPanel();
+                                     }, { tt: 'Opens Generate with these frames in "Draw some frames again"' }) : null) : null);
         }
 
         // where it stands
@@ -740,6 +748,36 @@
             put(body, note('Deforum draws {0} frames of {1}×{2}: about {3} minutes here.', count, W, H,
                            fmt(count * (W * H / (768 * 768)) * O.steps * 0.32 * (1 + 0.22 * extra) / 60, 0)));
         }
+        // some frames of the chain drawn into, drawn again (the rest kept)
+        const target = G.target && E.chain(G.target);
+        if (target && target.generated && target.make && target.generated.from === G.source) {
+            const redrawProgress = progressBox('redraw');
+            redrawProgress.dataset.place = 'redraw';
+            const framesEl = h('input', { type: 'text', class: 'ts-input', value: UI.redrawText || '', placeholder: T('e.g. 18-21, 44') });
+            framesEl.addEventListener('change', () => { UI.redrawText = framesEl.value; });
+            if (UI.redrawNewSeed == null) UI.redrawNewSeed = true;
+            const newSeed = h('input', { type: 'checkbox', class: 'ts-check', checked: UI.redrawNewSeed });
+            newSeed.addEventListener('change', () => { UI.redrawNewSeed = newSeed.checked; });
+            put(body, section('Draw some frames again', !!UI.redrawText,
+                note('Only these frames of "{0}" are drawn again, with the scenes and settings above (a steady look keeps the anchors it was drawn with); every other frame stays as it is, and the chain is cut again.', target.name),
+                row(field('Frames', framesEl, 'Frame numbers of the drawn chain, as in "18-21, 44"'),
+                    field('With a new seed', newSeed, 'The same seed and settings would draw the same frames again'),
+                    target.suspects && target.suspects.length ? button('The frames that look wrongly cut', () => {
+                        UI.redrawText = target.suspects.join(', '); framesEl.value = UI.redrawText;
+                    }) : null),
+                target.generated.redrawn && target.generated.redrawn.length ? note('Drawn again so far: {0}', target.generated.redrawn.join(', ')) : null,
+                row(button('Draw these frames again', async () => {
+                    UI.redrawText = framesEl.value;
+                    const frames = Core.parseFrames(UI.redrawText, target.frames);
+                    if (!frames.length) throw new Error('Choose which frames to draw again');
+                    G.redraws = (G.redraws || 0) + 1;
+                    const options = Object.assign({}, O, { redraw_seed: UI.redrawNewSeed ? (+O.seed || 0) + 7919 * G.redraws : null });
+                    await run(redrawProgress, p => E.redraw(G.source, options, target.id, frames, p));
+                    say(T('Drawn again: {0} frames of "{1}"', frames.length, target.name), 'ok'); renderPanel();
+                }, { class: 'ts-btn ts-primary' })),
+                redrawProgress));
+        }
+
         put(body, row(button('Generate with Deforum', async () => {
                 if (!(O.prompt || '').trim() && !O.scenes.some(s => (s.text || '').trim())) throw new Error('Say who is drawn first');
                 const files = UI.motionFiles;

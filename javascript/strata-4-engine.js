@@ -300,6 +300,23 @@
         return c;
     };
 
+    /* frames `frames` of drawn chain `targetId` drawn again (with `options` as set now, usually a new seed); the
+     * rest of the chain is kept and the chain is cut again */
+    E.redraw = async function (sourceId, options, targetId, frames, progress) {
+        const c = E.chain(targetId);
+        if (!c || !c.generated || !c.make) throw new Error('Only a drawn chain can have some of its frames drawn again');
+        if (!frames.length) throw new Error('Choose which frames to draw again');
+        const job = await E.api('job/start', { kind: 'deforum', params: { project: E.project, source: sourceId, chain: targetId,
+                                                                          options: Object.assign({}, options, { redraw: frames }) } });
+        const result = await E.waitJob(job, progress);
+        Object.assign(c, { frames: result.frames, make: result.make, width: result.width, height: result.height, fps: result.fps,
+                           figure: result.figure, baseline: result.baseline, suspects: result.suspects, method: result.method });
+        c.generated.redrawn = Array.from(new Set([...(c.generated.redrawn || []), ...(result.redrawn || frames)])).sort((a, b) => a - b);
+        E.touch();
+        await E.loadFrames();
+        return result;
+    };
+
     /* the frames of the chain Deforum is drawing that are not on the graphics card yet, up to `count` */
     E.liveMore = async function (count) {
         const L = E.live;

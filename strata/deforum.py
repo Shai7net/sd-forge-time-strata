@@ -45,6 +45,8 @@ DEFAULTS = {
     "look": None,           # a picture whose look IP-Adapter gives every frame (a scene may have its own)
     "upscale": None,        # the drawn frames made larger with Real-ESRGAN before their cut ("model:scale")
     "steady": None,         # {"on", "weight"}: one anchor frame drawn first per scene gives the scene its look (IP-Adapter)
+    "redraw": None,         # frames of the drawn chain to draw again (the rest kept); see _redraw
+    "redraw_seed": None,    # the seed for those frames (usually not the one that drew them the first time)
 }
 
 # What each ControlNet unit sees and which model and preprocessor it takes (found among the ones installed).
@@ -742,6 +744,67 @@ def _anchor_scenes(job, project, source, target, folder, options, scenes, units,
     shutil.rmtree(os.path.join(anchors, "deforum"), ignore_errors=True)
 
 
+def redraw_map(drawn_with, frames, count):
+    """Frames n of a drawn chain -> (the frames, sorted and inside the chain; the motion frames they were drawn
+    from), by the first frame and the step the chain was drawn with."""
+    first = int(drawn_with.get("first") or 0)
+    every = max(1, int(drawn_with.get("every") or 1))
+    wanted = sorted({int(n) for n in frames if 0 <= int(n) < count})
+    return wanted, [first + n * every for n in wanted]
+
+
+def _redraw(job, project, source, target, folder, options, scenes, units, uses, found, deforum_folder):
+    """Some frames of a drawn chain drawn again - with the scenes and look set now and usually a new seed - in
+    place of the old ones; every other frame is kept as it is. The steady look keeps the anchors the chain was
+    drawn with, so the new frames match the old. Then the chain is cut again (only the new frames are enlarged
+    again when it is sharpened)."""
+    record = store.read_chain(project, target)
+    drawn_with = ((record or {}).get("extra") or {}).get("deforum") or {}
+    if not record or drawn_with.get("from") != source or not os.path.isdir(os.path.join(folder, "source")):
+        raise jobs.JobError("only frames of a chain drawn from this motion can be drawn again")
+    frames, picks = redraw_map(drawn_with.get("options") or {}, options["redraw"], int(record["frames"]))
+    if not frames:
+        raise jobs.JobError("choose which frames to draw again")
+    options = dict(options)
+    if options.get("redraw_seed") is not None:
+        options["seed"] = int(options["redraw_seed"])
+    steady = options.get("steady") or {}
+    if steady.get("on") and found["units"]["look"]["model"]:
+        kept = [os.path.join(folder, "anchors", f"look_{i}.png") for i in range(len(scenes))]
+        if all(scene.get("look") or os.path.isfile(path) for scene, path in zip(scenes, kept)):
+            for scene, path in zip(scenes, kept):
+                scene["look"] = scene.get("look") or store.relative(project, path)
+        else:
+            _anchor_scenes(job, project, source, target, folder, options, scenes, units, uses, found, deforum_folder)
+        units["look"] = dict(units["look"], on=True, weight=float(steady.get("weight") or 0.55), start=0.0, end=1.0)
+        uses = uses | {"look"}
+    sub = os.path.join(folder, "redraw")
+    shutil.rmtree(sub, ignore_errors=True)
+    os.makedirs(sub)
+    try:
+        # (Deforum needs two frames at least: one frame alone is drawn twice)
+        motion = _motion(_Share(job, 0.0, 0.05), project, source, sub, options, scenes, uses, pick=picks if len(picks) > 1 else picks * 2)
+        data = settings(_base_settings(deforum_folder), motion, options, f"TimeStrata_{target}_redraw", scenes, units, found)
+        job.step(f"drawing {len(frames)} frames again", 0.05)
+        drawn = _run(job, sub, motion, data, f"TimeStrata_{target}_redraw", options, share=(0.05, 0.6))
+        pictures = os.path.join(folder, "source")
+        enlarged = os.path.join(folder, "upscale", "out")
+        for n, path in zip(frames, drawn):
+            shutil.copyfile(path, os.path.join(pictures, f"{n:06d}.png"))
+            old = os.path.join(enlarged, f"{n:06d}.png")
+            if os.path.isfile(old):
+                os.remove(old)              # (enlarged again from the new drawing when the chain is cut)
+    finally:
+        shutil.rmtree(sub, ignore_errors=True)
+    extra = dict(record.get("extra") or {})
+    extra["deforum"] = dict(drawn_with, redrawn=sorted(set(drawn_with.get("redrawn") or []) | set(frames)))
+    result = chain.build(_Share(job, 0.6, 1.0), project, target, record["source"], chain._options({"options": record.get("options") or {}}),
+                         priors=chain._known_figure(project, target), extra=extra)
+    result["from"] = source
+    result["redrawn"] = frames
+    return result
+
+
 @jobs.handler("deforum")
 def generate(job):
     """params: project, source (the motion chain), chain (the new chain), options (see DEFAULTS)"""
@@ -766,6 +829,9 @@ def generate(job):
         if unit["on"] and not found["units"][kind]["model"]:
             print(f"[Time Strata] no ControlNet model for '{kind}' was found: that unit is left out")
     uses = {kind for kind, unit in units.items() if unit["on"] and found["units"][kind]["model"]}
+
+    if options.get("redraw"):
+        return _redraw(job, project, source, target, folder, options, scenes, units, uses, found, deforum_folder)
 
     steady = options.get("steady") or {}
     if steady.get("on") and found["units"]["look"]["model"]:

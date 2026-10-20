@@ -283,3 +283,11 @@ test('looking ahead never takes the figure out of an upright picture', () => {
     const ahead = C.followAt([{ t: 0, yaw: 0, elevation: 10, fill: 0.5, aim: 0.55, lead: 1, smooth: 1, fov }], path, 0, { s: 8, size: 1.7, faces: 'end', aspect });
     assert.ok(C.len(C.sub(ahead.target, C.add(C.pointAt(path, 8).p, [0, 1.7 * 0.5, 0]))) > 0.9, 'seen from in front the look ahead is kept');
 });
+
+test('frame numbers are read as a person writes them', () => {
+    assert.deepStrictEqual(C.parseFrames('18-21, 44 50', 100), [18, 19, 20, 21, 44, 50]);
+    assert.deepStrictEqual(C.parseFrames('7, 3–5; 3', 100), [3, 4, 5, 7]);
+    assert.deepStrictEqual(C.parseFrames('12-9', 100), [9, 10, 11, 12]);
+    assert.deepStrictEqual(C.parseFrames('5, 300, x, 98-102', 100), [5, 98, 99]);
+    assert.deepStrictEqual(C.parseFrames('', 10), []);
+});

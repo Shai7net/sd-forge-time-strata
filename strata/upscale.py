@@ -167,33 +167,54 @@ def upscale_folder(source, target, choice, job=None, share=(0.0, 1.0)):
 
 def upscaled_frames(job, folder, count, frames, choice, share=(0.0, 0.2)):
     """The source frames made larger once and kept in `folder` (a chain's own upscale folder), so placing them again
-    reads the same frames: -> a function giving them again, as RGBA arrays."""
+    reads the same frames; a frame whose enlarged copy is missing (drawn again) is enlarged again, alone.
+    -> a function giving them again, as RGBA arrays."""
     done_path = os.path.join(folder, "done.json")
     wanted = {"choice": choice, "count": count}
     out = os.path.join(folder, "out")
     try:
         with open(done_path, "r", encoding="utf8") as file:
-            fresh = json.load(file) == wanted and len(os.listdir(out)) == count
+            same = json.load(file) == wanted
     except (OSError, ValueError):
-        fresh = False
-    if not fresh:
-        source = os.path.join(folder, "in")
-        shutil.rmtree(source, ignore_errors=True)
-        os.makedirs(source)
+        same = False
+    have = set(os.listdir(out)) if same and os.path.isdir(out) else set()
+    missing = [n for n in range(count) if f"{n:06d}.png" not in have]
+    if missing:
+        source, made, alphas = os.path.join(folder, "in"), os.path.join(folder, "made"), os.path.join(folder, "alpha")
+        for path in (source, alphas):
+            shutil.rmtree(path, ignore_errors=True)
+            os.makedirs(path)
+        asked = set(missing)
         for n, frame in enumerate(frames()):
             if n >= count:
                 break
-            picture = frame if frame.shape[2] == 4 else np.dstack([frame, np.full(frame.shape[:2], 255, np.uint8)])
-            cv2.imwrite(os.path.join(source, f"{n:06d}.png"), cv2.cvtColor(picture, cv2.COLOR_RGBA2BGRA))
+            if n not in asked:
+                continue
+            # the program gets colour only (its four-channel path garbles small pictures: colours off, alpha
+            # 59); a frame's own transparency is enlarged on its own and put back
+            cv2.imwrite(os.path.join(source, f"{n:06d}.png"), cv2.cvtColor(np.ascontiguousarray(frame[..., :3]), cv2.COLOR_RGB2BGR))
+            if frame.shape[2] == 4 and frame[..., 3].min() < 255:
+                cv2.imwrite(os.path.join(alphas, f"{n:06d}.png"), frame[..., 3])
             if job and n % 16 == 0:
                 job.step(f"setting out frame {n + 1} of {count} for upscaling", share[0] + (share[1] - share[0]) * 0.1 * n / count)
         from . import cut
         cut.free_graphics_memory()           # (Vulkan shares the card with Forge's models)
-        upscale_folder(source, out, choice, job, (share[0] + (share[1] - share[0]) * 0.1, share[1]))
-        shutil.rmtree(source, ignore_errors=True)
+        upscale_folder(source, made, choice, job, (share[0] + (share[1] - share[0]) * 0.1, share[1]))
+        for name in os.listdir(alphas):
+            colour = cv2.imread(os.path.join(made, name), cv2.IMREAD_COLOR)
+            alpha = cv2.resize(cv2.imread(os.path.join(alphas, name), cv2.IMREAD_GRAYSCALE), (colour.shape[1], colour.shape[0]),
+                               interpolation=cv2.INTER_CUBIC)
+            cv2.imwrite(os.path.join(made, name), np.dstack([colour, alpha]))
+        if not same:
+            shutil.rmtree(out, ignore_errors=True)
+        os.makedirs(out, exist_ok=True)
+        for name in os.listdir(made):
+            os.replace(os.path.join(made, name), os.path.join(out, name))
+        for path in (source, made, alphas):
+            shutil.rmtree(path, ignore_errors=True)
         with open(done_path, "w", encoding="utf8") as file:
             json.dump(wanted, file)
-    names = sorted(os.listdir(out))[:count]
+    names = [f"{n:06d}.png" for n in range(count)]
 
     def again():
         for name in names:

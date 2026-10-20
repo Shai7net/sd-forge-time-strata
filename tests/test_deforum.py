@@ -77,6 +77,14 @@ class SteadyLook(unittest.TestCase):
         self.assertEqual(deforum.anchor_frames(scenes, [], 6, 30, 12), [15, 27])
 
 
+class Redraw(unittest.TestCase):
+    def test_drawn_frames_map_back_to_their_motion_frames(self):
+        frames, picks = deforum.redraw_map({"first": 10, "every": 2}, [5, 0, 5, 99, -1, 3], 20)
+        self.assertEqual(frames, [0, 3, 5])
+        self.assertEqual(picks, [10, 16, 20])
+        self.assertEqual(deforum.redraw_map({}, [7], 8), ([7], [7]))
+
+
 class Units(unittest.TestCase):
     def test_an_older_project_has_the_pose_alone_at_its_weight(self):
         units = deforum._units({"pose": 0.7})

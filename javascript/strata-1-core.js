@@ -89,6 +89,20 @@
         return out;
     }
 
+    /* "18-21, 44 50" -> [18, 19, 20, 21, 44, 50]: frame numbers as a person writes them (ranges with - or –,
+     * separated by commas or spaces), sorted, once each, only those below `count` */
+    function parseFrames(text, count) {
+        const out = new Set();
+        for (const part of String(text || '').split(/[\s,;]+/)) {
+            const m = part.match(/^(\d+)(?:\s*[-–]\s*(\d+))?$/);
+            if (!m) continue;
+            let a = +m[1], b = m[2] != null ? +m[2] : a;
+            if (b < a) [a, b] = [b, a];
+            for (let k = a; k <= Math.min(b, a + 5000); k++) if (count == null || k < count) out.add(k);
+        }
+        return [...out].sort((x, y) => x - y);
+    }
+
     /* the spine's centre line as points every `step` metres of horizontal travel, from a description */
     function centreLine(spine, length, step) {
         const sp = Object.assign({}, SPINE_DEFAULTS, spine);
@@ -573,7 +587,7 @@
         SPINE_DEFAULTS, CHAIN_DEFAULTS, CAMERA_FIELDS, TIME_DEFAULTS, RIDING,
         centreLine, spinePath, pointAt, cardSize, chainCards, chainLength, presentAt, presence, presentS,
         track, cameraAt, nearestS, keyFromView, knifeAt, preset, plan, passRates, lookAt, perspective, multiply,
-        steering, compressSteer, FOLLOW_FIELDS, followAt, followPreset,
+        steering, compressSteer, parseFrames, FOLLOW_FIELDS, followAt, followPreset,
     };
     if (typeof module !== 'undefined' && module.exports) module.exports = Core;
     else root.StrataCore = Core;

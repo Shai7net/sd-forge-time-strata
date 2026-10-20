@@ -109,6 +109,8 @@ Change project and export locations under **Settings → Time Strata**. Back up 
 4. **Keep the look steady** (under ControlNet) draws one frame of each scene first — from the moment its figure is largest — and gives every frame of the scene that frame's look through IP-Adapter. Prompts that dress the figure ("a water warrior in long robes, surrounded by swirling water") hold better than "a body made of water", which the model tends to draw bare; the anchor's look spreads to the whole scene, so it is worth a short test with **Every** 50 first.
 5. Choose the **Checkpoint** (Forge's own is put back afterwards), sampler, steps, how much of the motion frame is kept and, for sharp close-ups, **Sharper drawn frames (Real-ESRGAN)**; then **Generate with Deforum**. The new chain grows in the 3D view frame by frame; press **🎮 Steer** to move it through space while it grows. At the end it is cut cleanly (the backdrop's colour together with BiRefNet-lite, so see-through figures stay whole) and stands where the motion stood.
 
+**Drawing some frames again.** When a few frames come out wrong (a face, a hand, a frame that the cut flags), choose the drawn chain under **Draw into** and use **Draw some frames again**: only those frames are drawn again — with the scenes and settings as they are now, usually with a new seed, and with the anchors of a steady look kept — and the chain is cut again; every other frame stays exactly as it was. **Draw them again** beside a chain's wrongly-cut frames fills them in for you.
+
 ## Optional: one dance across a lifetime
 
 The example demonstrates a creative use of Deforum: preserve the movement of a performance while changing its appearance along the timeline.
