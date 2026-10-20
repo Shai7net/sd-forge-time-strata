@@ -84,6 +84,15 @@ class Redraw(unittest.TestCase):
         self.assertEqual(picks, [10, 16, 20])
         self.assertEqual(deforum.redraw_map({}, [7], 8), ([7], [7]))
 
+    def test_a_new_seed_is_never_one_the_chain_was_drawn_with(self):
+        drawn_with = {"options": {"seed": 1234}, "redraw_seeds": [1234 + 7919]}
+        # a page opened again proposes the first redraw's seed once more: it moves on
+        self.assertEqual(deforum.redraw_seed(drawn_with, 1234 + 7919), 1234 + 2 * 7919)
+        self.assertEqual(deforum.redraw_seed(drawn_with, 1234), 1234 + 2 * 7919)
+        self.assertEqual(deforum.redraw_seed(drawn_with, 99), 99)
+        self.assertIsNone(deforum.redraw_seed(drawn_with, None))
+        self.assertEqual(deforum.redraw_seed({}, 5), 5)
+
 
 class Units(unittest.TestCase):
     def test_an_older_project_has_the_pose_alone_at_its_weight(self):

@@ -46,7 +46,7 @@ DEFAULTS = {
     "upscale": None,        # the drawn frames made larger with Real-ESRGAN before their cut ("model:scale")
     "steady": None,         # {"on", "weight"}: one anchor frame drawn first per scene gives the scene its look (IP-Adapter)
     "redraw": None,         # frames of the drawn chain to draw again (the rest kept); see _redraw
-    "redraw_seed": None,    # the seed for those frames (usually not the one that drew them the first time)
+    "redraw_seed": None,    # a new seed for those frames, moved past every seed the chain was drawn with (redraw_seed)
 }
 
 # What each ControlNet unit sees and which model and preprocessor it takes (found among the ones installed).
@@ -753,6 +753,20 @@ def redraw_map(drawn_with, frames, count):
     return wanted, [first + n * every for n in wanted]
 
 
+def redraw_seed(drawn_with, asked):
+    """The seed some frames are drawn again with: the one asked for, moved on past every seed the chain was drawn
+    with before (the same seed draws the same frames again, and a page opened again proposes the same seed)."""
+    if asked is None:
+        return None
+    used = {int(seed) for seed in drawn_with.get("redraw_seeds") or []}
+    if (drawn_with.get("options") or {}).get("seed") is not None:
+        used.add(int(drawn_with["options"]["seed"]))
+    seed = int(asked)
+    while seed in used:
+        seed += 7919
+    return seed
+
+
 def _redraw(job, project, source, target, folder, options, scenes, units, uses, found, deforum_folder):
     """Some frames of a drawn chain drawn again - with the scenes and look set now and usually a new seed - in
     place of the old ones; every other frame is kept as it is. The steady look keeps the anchors the chain was
@@ -766,8 +780,9 @@ def _redraw(job, project, source, target, folder, options, scenes, units, uses, 
     if not frames:
         raise jobs.JobError("choose which frames to draw again")
     options = dict(options)
-    if options.get("redraw_seed") is not None:
-        options["seed"] = int(options["redraw_seed"])
+    seed = redraw_seed(drawn_with, options.get("redraw_seed"))
+    if seed is not None:
+        options["seed"] = seed
     steady = options.get("steady") or {}
     if steady.get("on") and found["units"]["look"]["model"]:
         kept = [os.path.join(folder, "anchors", f"look_{i}.png") for i in range(len(scenes))]
@@ -798,10 +813,13 @@ def _redraw(job, project, source, target, folder, options, scenes, units, uses, 
         shutil.rmtree(sub, ignore_errors=True)
     extra = dict(record.get("extra") or {})
     extra["deforum"] = dict(drawn_with, redrawn=sorted(set(drawn_with.get("redrawn") or []) | set(frames)))
+    if seed is not None:
+        extra["deforum"]["redraw_seeds"] = sorted(set(drawn_with.get("redraw_seeds") or []) | {seed})
     result = chain.build(_Share(job, 0.6, 1.0), project, target, record["source"], chain._options({"options": record.get("options") or {}}),
                          priors=chain._known_figure(project, target), extra=extra)
     result["from"] = source
     result["redrawn"] = frames
+    result["seed"] = options["seed"]
     return result
 
 

@@ -770,8 +770,8 @@
                     UI.redrawText = framesEl.value;
                     const frames = Core.parseFrames(UI.redrawText, target.frames);
                     if (!frames.length) throw new Error('Choose which frames to draw again');
-                    G.redraws = (G.redraws || 0) + 1;
-                    const options = Object.assign({}, O, { redraw_seed: UI.redrawNewSeed ? (+O.seed || 0) + 7919 * G.redraws : null });
+                    // (the server moves it past every seed the chain was drawn with)
+                    const options = Object.assign({}, O, { redraw_seed: UI.redrawNewSeed ? (+O.seed || 0) + 7919 : null });
                     await run(redrawProgress, p => E.redraw(G.source, options, target.id, frames, p));
                     say(T('Drawn again: {0} frames of "{1}"', frames.length, target.name), 'ok'); renderPanel();
                 }, { class: 'ts-btn ts-primary' })),
