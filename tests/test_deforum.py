@@ -79,10 +79,13 @@ class SteadyLook(unittest.TestCase):
 
 class Redraw(unittest.TestCase):
     def test_drawn_frames_map_back_to_their_motion_frames(self):
-        frames, picks = deforum.redraw_map({"first": 10, "every": 2}, [5, 0, 5, 99, -1, 3], 20)
+        # (a chain drawn before the motion frames were kept: by its first frame and step)
+        frames, picks = deforum.redraw_map({"options": {"first": 10, "every": 2}}, [5, 0, 5, 99, -1, 3], 20)
         self.assertEqual(frames, [0, 3, 5])
         self.assertEqual(picks, [10, 16, 20])
         self.assertEqual(deforum.redraw_map({}, [7], 8), ([7], [7]))
+        # frames with no figure were left out: the kept list says where each drawn frame came from
+        self.assertEqual(deforum.redraw_map({"motion_frames": [0, 1, 2, 5, 6], "options": {"every": 1}}, [2, 3], 5), ([2, 3], [2, 5]))
 
     def test_a_new_seed_is_never_one_the_chain_was_drawn_with(self):
         drawn_with = {"options": {"seed": 1234}, "redraw_seeds": [1234 + 7919]}
@@ -163,6 +166,54 @@ class TextureTime(unittest.TestCase):
             self.assertLess(int(texture.at(0.5).mean()), 80, "and going back works")
             self.assertGreater(int(texture.at(3.5).mean()), 170, "it loops")
             texture.close()
+
+class SkipEmpty(unittest.TestCase):
+    def test_motion_frames_with_no_figure_are_not_drawn(self):
+        import tempfile
+        from PIL import Image
+        from strata import cut, store
+
+        class Job:
+            def step(self, *a, **k):
+                pass
+
+        with tempfile.TemporaryDirectory() as root:
+            before = os.environ.get("STRATA_ROOT")
+            os.environ["STRATA_ROOT"] = root
+            try:
+                os.makedirs(os.path.join(root, "p"))
+                with open(os.path.join(root, "p", "project.json"), "w") as file:
+                    file.write("{}")
+                make = os.path.join(store.chain_dir("p", "motion", create=True), "v0001")
+                os.makedirs(make)
+                measures = []
+                for k in range(8):
+                    alpha = np.zeros((40, 24), np.uint8)
+                    if k not in (3, 4):                    # a whip pan: no figure in frames 3 and 4
+                        alpha[8:38, 8:16] = 255
+                    Image.fromarray(np.dstack([np.full((40, 24, 3), 200, np.uint8), alpha]), "RGBA").save(os.path.join(make, f"{k:06d}.webp"))
+                    measures.append(cut.measure(alpha / 255.0))
+                store.write_chain("p", "motion", {"make": "v0001", "frames": 8, "fps": 24, "width": 24, "height": 40, "measures": measures})
+                scenes = [{"from": 0.0, "text": "glass"}]
+                options = dict(deforum.DEFAULTS)
+                out = os.path.join(root, "drawn")
+                os.makedirs(out)
+                motion = deforum._motion(Job(), "p", "motion", out, options, scenes, set())
+                self.assertEqual(motion["picked"], [0, 1, 2, 5, 6, 7])
+                self.assertEqual(motion["skipped"], [3, 4])
+                self.assertEqual(motion["frames"], 6)
+                self.assertEqual(motion["times"], [k / 24 for k in (0, 1, 2, 5, 6, 7)], "the scenes keep the motion's own time")
+                self.assertEqual(len(os.listdir(os.path.join(out, "prior"))), 6)
+                options["skip_empty"] = False
+                self.assertEqual(deforum._motion(Job(), "p", "motion", out, options, scenes, set())["picked"], list(range(8)))
+                # frames picked by hand (drawn again) are drawn as asked
+                self.assertEqual(deforum._motion(Job(), "p", "motion", out, dict(deforum.DEFAULTS), scenes, set(), pick=[3, 5])["picked"], [3, 5])
+            finally:
+                if before is None:
+                    os.environ.pop("STRATA_ROOT", None)
+                else:
+                    os.environ["STRATA_ROOT"] = before
+
 
 class Live(unittest.TestCase):
     def test_a_drawn_frame_is_cut_where_the_motion_stands(self):

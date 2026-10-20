@@ -139,6 +139,10 @@
             'ב-{0} פריימים אין דמות, כי גם בתנועה אין שם (מעבר בין שוטים, הבזק): {1}',
         '{0} frames have no figure: {1}. A cut between shots or a flash has none; otherwise the cut lost it.':
             'ב-{0} פריימים אין דמות: {1}. במעבר בין שוטים או בהבזק אין דמות; אחרת החיתוך איבד אותה.',
+        'Skip frames with no figure': 'דלג על פריימים בלי דמות',
+        'A frame of the motion with no figure (a cut between shots, a flash) would be drawn as plain backdrop: it is left out, and the drawn chain goes on from the next figure':
+            'פריים של התנועה בלי דמות (מעבר בין שוטים, הבזק) היה מצויר כרקע ריק: הוא מושמט, והשרשרת המצוירת ממשיכה מהדמות הבאה',
+        '{0} frames of the motion have no figure and are not drawn.': '{0} פריימים של התנועה בלי דמות ולא יצוירו.',
         'Something is already being made; wait for it': 'משהו כבר נוצר; חכה לו',
         'waiting, {0} before it': 'ממתין, {0} לפניו',
         'reading the source': 'קריאת המקור',

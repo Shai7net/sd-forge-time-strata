@@ -633,7 +633,8 @@
         const G = doc.generate = doc.generate || {};
         G.options = Object.assign({ prompt: '', stages: [], scenes: [], blend: 1, negative: 'blurry, deformed, extra limbs, text, watermark, nsfw, nude',
                                     prefix: '<lora:LCM_SD15:1>', suffix: '', sampler: last.sampler || 'LCM', steps: last.steps || 8, cfg: last.cfg || 1.5,
-                                    strength: 0.3, pose: 0.9, seed: 1234, background: '#808080', first: 0, last: null, every: 1, look: null }, G.options);
+                                    strength: 0.3, pose: 0.9, seed: 1234, background: '#808080', first: 0, last: null, every: 1, look: null,
+                                    skip_empty: true }, G.options);
         const O = G.options;
         O.fill = Object.assign({ amount: 0, texture: null }, O.fill);
         O.steady = Object.assign({ on: false, weight: 0.55 }, O.steady);
@@ -742,13 +743,19 @@
                                          'Each drawn frame is made larger before it is cut, and the chain\'s frames are that much taller: sharp close-ups. Deforum\'s own upscaler') : null),
             row(field('Backdrop', colour(O, 'background'), 'The flat colour the figure is drawn on, and cut away by'),
                 field('First frame', number(O, 'first', { min: 0, step: 1 })), field('Last frame', number(O, 'last', { min: 0, step: 1, empty: null, placeholder: T('last') })),
-                field('Every', number(O, 'every', { min: 1, step: 1 }), 'Draw every n-th frame of the motion (fewer frames, faster)')),
+                field('Every', number(O, 'every', { min: 1, step: 1 }), 'Draw every n-th frame of the motion (fewer frames, faster)'),
+                field('Skip frames with no figure', check(O, 'skip_empty', () => renderPanel()),
+                      'A frame of the motion with no figure (a cut between shots, a flash) would be drawn as plain backdrop: it is left out, and the drawn chain goes on from the next figure')),
             last.from ? note('Sampler, steps and CFG start from your last Deforum render.') : null));
 
         const progress = progressBox('generate');
         progress.dataset.place = 'generate';
         if (from) {
-            const count = Math.max(0, Math.floor(((O.last == null ? from.frames - 1 : O.last) - (O.first || 0)) / Math.max(1, O.every)) + 1);
+            const first = O.first || 0, end = O.last == null ? from.frames - 1 : O.last, step = Math.max(1, O.every);
+            // (a motion placed before frames with no figure were told apart has no list of them: none are counted)
+            const skipped = O.skip_empty ? (from.figureless || []).filter(k => k >= first && k <= end && (k - first) % step === 0).length : 0;
+            const count = Math.max(0, Math.floor((end - first) / step) + 1 - skipped);
+            if (skipped) put(body, note('{0} frames of the motion have no figure and are not drawn.', skipped));
             const W = Math.ceil(from.width / 64) * 64, H = Math.ceil(from.height / 64) * 64;
             const extra = UNITS.filter(([kind]) => kind !== 'pose' && units[kind].on).length;
             put(body, note('Deforum draws {0} frames of {1}×{2}: about {3} minutes here.', count, W, H,

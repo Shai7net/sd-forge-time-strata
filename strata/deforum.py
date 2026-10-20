@@ -47,6 +47,7 @@ DEFAULTS = {
     "steady": None,         # {"on", "weight"}: one anchor frame drawn first per scene gives the scene its look (IP-Adapter)
     "redraw": None,         # frames of the drawn chain to draw again (the rest kept); see _redraw
     "redraw_seed": None,    # a new seed for those frames, moved past every seed the chain was drawn with (redraw_seed)
+    "skip_empty": True,     # motion frames with no figure (a cut between shots, a flash) are not drawn
 }
 
 # What each ControlNet unit sees and which model and preprocessor it takes (found among the ones installed).
@@ -332,7 +333,8 @@ def _motion(job, project, source, folder, options, scenes, uses, pick=None):
     the pose, depth and edges are read from), the picture Deforum starts each frame from (the figure filled with
     its scene's texture, when there is one), where it may paint, the silhouette and the look pictures. Each
     frame's figure (its alpha, padded the same way) is kept as the prior of the cut. `pick`: these motion frames
-    instead of first/last/every (the anchors of a steady look)."""
+    instead of first/last/every (the anchors of a steady look, frames drawn again). The motion frames used are
+    returned as `picked`: frame n of the drawing is motion frame picked[n]."""
     record = store.read_chain(project, source)
     if not record or not record.get("make"):
         raise jobs.JobError("the motion chain has not been made yet")
@@ -341,6 +343,14 @@ def _motion(job, project, source, folder, options, scenes, uses, pick=None):
     if pick is not None:
         frames = list(pick)
     frames = [k for k in frames if 0 <= k < record["frames"]]
+    skipped = []
+    if pick is None and options.get("skip_empty", True) and record.get("measures"):
+        # (with no figure to follow - a cut between shots, a flash - Deforum draws plain backdrop)
+        empty = set(cut.figureless(record["measures"]))
+        skipped = [k for k in frames if k in empty]
+        frames = [k for k in frames if k not in empty]
+        if skipped and len(frames) < 2:
+            raise jobs.JobError("the motion has no figure in the frames chosen")
     if len(frames) < 2:
         raise jobs.JobError("choose at least two frames of the motion chain")
     w, h = record["width"], record["height"]
@@ -432,12 +442,13 @@ def _motion(job, project, source, folder, options, scenes, uses, pick=None):
         for key, process in processes.items():
             process.stdin.close()
             error = process.stderr.read().decode("utf8", "replace")
+            process.stderr.close()
             if process.wait() != 0:
                 errors.append(f"{key}: {error[-300:]}")
         if errors:
             raise jobs.JobError("the motion clip could not be written: " + "; ".join(errors))
     return dict(paths, frames=len(frames), width=W, height=H, fps=fps, record=record, left=left, top=top, times=times,
-                init=paths.get("init", paths["video"]), looking=looking)
+                init=paths.get("init", paths["video"]), looking=looking, picked=frames, skipped=skipped)
 
 
 # --- Deforum's settings ------------------------------------------------------------------------------------------
@@ -746,11 +757,14 @@ def _anchor_scenes(job, project, source, target, folder, options, scenes, units,
 
 def redraw_map(drawn_with, frames, count):
     """Frames n of a drawn chain -> (the frames, sorted and inside the chain; the motion frames they were drawn
-    from), by the first frame and the step the chain was drawn with."""
-    first = int(drawn_with.get("first") or 0)
-    every = max(1, int(drawn_with.get("every") or 1))
+    from). `drawn_with`: what the chain was drawn with (its record's extra.deforum): the motion frames it kept, or
+    for a chain drawn before those were kept, the first frame and the step."""
+    picked = drawn_with.get("motion_frames") or []
+    options = drawn_with.get("options") or {}
+    first = int(options.get("first") or 0)
+    every = max(1, int(options.get("every") or 1))
     wanted = sorted({int(n) for n in frames if 0 <= int(n) < count})
-    return wanted, [first + n * every for n in wanted]
+    return wanted, [int(picked[n]) if n < len(picked) else first + n * every for n in wanted]
 
 
 def redraw_seed(drawn_with, asked):
@@ -776,7 +790,7 @@ def _redraw(job, project, source, target, folder, options, scenes, units, uses, 
     drawn_with = ((record or {}).get("extra") or {}).get("deforum") or {}
     if not record or drawn_with.get("from") != source or not os.path.isdir(os.path.join(folder, "source")):
         raise jobs.JobError("only frames of a chain drawn from this motion can be drawn again")
-    frames, picks = redraw_map(drawn_with.get("options") or {}, options["redraw"], int(record["frames"]))
+    frames, picks = redraw_map(drawn_with, options["redraw"], int(record["frames"]))
     if not frames:
         raise jobs.JobError("choose which frames to draw again")
     options = dict(options)
@@ -905,7 +919,9 @@ def generate(job):
     result = chain.build(_Share(job, 0.9, 1.0), project, target,
                          {"kind": "pictures", "path": f"chains/{target}/source", "fps": motion["fps"]},
                          cut_options, priors=priors,
-                         extra={"deforum": {"from": source, "options": options, "settings": "deforum_settings.json"}})
+                         extra={"deforum": {"from": source, "options": options, "settings": "deforum_settings.json",
+                                            "motion_frames": motion["picked"]}})
     shutil.rmtree(os.path.join(folder, "live"), ignore_errors=True)
     result["from"] = source
+    result["skipped"] = motion["skipped"]
     return result
