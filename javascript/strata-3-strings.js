@@ -135,6 +135,10 @@
         'a flat colour': 'צבע אחיד',
         'its own transparency': 'השקיפות שלו',
         '{0} frames look wrongly cut: {1}': '{0} פריימים נראים חתוכים לא נכון: {1}',
+        '{0} frames have no figure, as the motion has none there (a cut between shots, a flash): {1}':
+            'ב-{0} פריימים אין דמות, כי גם בתנועה אין שם (מעבר בין שוטים, הבזק): {1}',
+        '{0} frames have no figure: {1}. A cut between shots or a flash has none; otherwise the cut lost it.':
+            'ב-{0} פריימים אין דמות: {1}. במעבר בין שוטים או בהבזק אין דמות; אחרת החיתוך איבד אותה.',
         'Something is already being made; wait for it': 'משהו כבר נוצר; חכה לו',
         'waiting, {0} before it': 'ממתין, {0} לפניו',
         'reading the source': 'קריאת המקור',

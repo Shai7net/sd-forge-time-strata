@@ -206,7 +206,7 @@
         const job = await E.api('job/start', { kind: 'chain', params: { project: E.project, chain: id, source: c.source, options, realign: !!realign } });
         const result = await E.waitJob(job, progress);
         Object.assign(c, { frames: result.frames, make: result.make, width: result.width, height: result.height, fps: result.fps,
-                           figure: result.figure, baseline: result.baseline, suspects: result.suspects, method: result.method });
+                           figure: result.figure, baseline: result.baseline, suspects: result.suspects, figureless: result.figureless || [], method: result.method });
         if (c.to != null && c.to >= c.frames) c.to = null;
         E.touch();
         await E.loadFrames();
@@ -223,7 +223,7 @@
                                                                          height: Math.min(2048, Math.round((c.height || 768) * scale)) } });
         const result = await E.waitJob(job, progress);
         Object.assign(c, { frames: result.frames, make: result.make, width: result.width, height: result.height, fps: result.fps,
-                           figure: result.figure, baseline: result.baseline, suspects: result.suspects, method: result.method });
+                           figure: result.figure, baseline: result.baseline, suspects: result.suspects, figureless: result.figureless || [], method: result.method });
         c.cut.upscale = choice; c.cut.height = result.height;
         E.touch();
         await E.loadFrames();
@@ -285,7 +285,7 @@
             }
         }
         Object.assign(c, { frames: result.frames, make: result.make, width: result.width, height: result.height, fps: result.fps,
-                           figure: result.figure, baseline: result.baseline, suspects: result.suspects, method: result.method,
+                           figure: result.figure, baseline: result.baseline, suspects: result.suspects, figureless: result.figureless || [], method: result.method,
                            source: { kind: 'pictures', path: `chains/${c.id}/source`, fps: result.fps } });
         c.visible = true;
         from.visible = false;
@@ -310,7 +310,7 @@
                                                                           options: Object.assign({}, options, { redraw: frames }) } });
         const result = await E.waitJob(job, progress);
         Object.assign(c, { frames: result.frames, make: result.make, width: result.width, height: result.height, fps: result.fps,
-                           figure: result.figure, baseline: result.baseline, suspects: result.suspects, method: result.method });
+                           figure: result.figure, baseline: result.baseline, suspects: result.suspects, figureless: result.figureless || [], method: result.method });
         c.generated.redrawn = Array.from(new Set([...(c.generated.redrawn || []), ...(result.redrawn || frames)])).sort((a, b) => a - b);
         E.touch();
         await E.loadFrames();

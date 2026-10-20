@@ -487,17 +487,48 @@ def _fill(values, good):
     return np.interp(index, index[good], values[good])
 
 
-def suspects(measures, jump=0.45):
-    """Frames whose cut is probably wrong: empty, or with an area far from that of the frames around them."""
-    n = len(measures)
+def figureless(measures, small=0.12):
+    """Frames with no figure, or only a sliver of one (`small` of the chain's usual area): a cut between shots,
+    a flash, a whip pan. Nothing there to cut out."""
     empty = np.array([bool(m.get("empty")) for m in measures])
+    if empty.all():
+        return [int(i) for i in np.nonzero(empty)[0]]
+    area = np.array([0.0 if m.get("empty") else m["area"] for m in measures])
+    return [int(i) for i in np.nonzero(empty | (area < small * np.median(area[~empty])))[0]]
+
+
+def suspects(measures, jump=0.45):
+    """Frames whose measures are not to be believed: with no figure, or with an area far from that of the frames
+    around them that have one (a run of empty frames between shots does not make its neighbours look large)."""
+    n = len(measures)
+    empty = np.zeros(n, bool)
+    empty[figureless(measures)] = True
     area = np.array([0.0 if m.get("empty") else m["area"] for m in measures])
     if n < 5 or empty.all():
         return [int(i) for i in np.nonzero(empty)[0]]
-    filled = _fill(area, ~empty)
-    typical = _rolling(filled, 6, np.median)
-    odd = empty | (np.abs(filled / np.maximum(typical, 1e-9) - 1.0) > jump)
+    typical = _rolling(_fill(area, ~empty), 6, np.median)
+    odd = empty | (np.abs(area / np.maximum(typical, 1e-9) - 1.0) > jump)
     return [int(i) for i in np.nonzero(odd)[0]]
+
+
+def agreement(frame, alpha, colour, distance=30.0):
+    """How a cut agrees with a flat backdrop it was drawn on: the share of what differs from the backdrop that the
+    cut keeps, and the share of the cut that lies on the backdrop (every other pixel looked at). The backdrop is
+    what reaches the frame's edge: a grey fold of a white robe, inside the figure, is not backdrop."""
+    rgb = frame[::2, ::2, :3].astype(np.float32)
+    drawn = np.linalg.norm(rgb - np.asarray(colour, np.float32)[:3], axis=2) > distance
+    closed = cv2.dilate(drawn.astype(np.uint8), np.ones((5, 5), np.uint8))
+    _count, labels = cv2.connectedComponents((closed == 0).astype(np.uint8), connectivity=4)
+    edge = np.unique(np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]]))
+    backdrop = np.isin(labels, edge[edge > 0])
+    solid = alpha[::2, ::2] >= 0.5
+    return float((solid & drawn).sum() / max(1, drawn.sum())), float((solid & backdrop).sum() / max(1, solid.sum()))
+
+
+def disagreeing(agreements, skip=(), kept=0.5, spill=0.25):
+    """Frames whose cut does not follow what was drawn: it lost much of the figure, or kept much backdrop."""
+    skip = set(skip)
+    return [k for k, (got, extra) in enumerate(agreements) if k not in skip and (got < kept or extra > spill)]
 
 
 def plan_alignment(measures, out_h, mode="centre", baseline=0.95, figure=0.84, margin=0.02, smooth=3.0,

@@ -233,9 +233,12 @@ def _steady_suspects(job, folder, measures, reach=0.04, around=3):
     return measures
 
 
-def _place_pass(job, project, chain_id, frames, measures, decided, options):
+def _place_pass(job, project, chain_id, frames, measures, decided, options, drawn=False):
+    """Places every frame. Returns the make, its size, the frames that look wrongly cut and those with no figure,
+    the plan and the figure's height. `drawn`: the frames were drawn on a flat backdrop (Deforum), so a cut is
+    judged by how it follows the drawing; a drawing is free to be larger than its neighbours (water, a cape)."""
     folder = store.chain_dir(project, chain_id)
-    bad = cut.suspects(measures)
+    bad = cut.suspects(measures)        # (not believed when placing)
     plan, width = cut.plan_alignment(measures, int(options["height"]), options["align"], options["baseline"], options["figure"],
                                      smooth=options["smooth"], ground=options["ground"], scale=options["scale"],
                                      out_w=options["width"], bad=bad)
@@ -244,10 +247,13 @@ def _place_pass(job, project, chain_id, frames, measures, decided, options):
     background = decided["key_colour"] if decided["matte"] in ("key", "keymodel") else None
     count = len(measures)
     figure_heights = []
+    agreements = []
     for n, frame in enumerate(frames()):
         if n >= count:
             break
         alpha = _load_alpha(os.path.join(folder, "alpha", f"{n:06d}.png"))
+        if drawn and background is not None:
+            agreements.append(cut.agreement(frame, alpha, background))
         placed = cut.render_frame(frame, alpha, plan[n], width, height, background, straight=decided["matte"] == "alpha")
         Image.fromarray(placed, "RGBA").save(os.path.join(out_folder, f"{n:06d}.webp"), "WEBP", quality=90, alpha_quality=100, method=2)
         if not measures[n].get("empty"):
@@ -256,7 +262,9 @@ def _place_pass(job, project, chain_id, frames, measures, decided, options):
         preview = jobs.preview_of(Image.fromarray(placed, "RGBA")) if n % 8 == 0 else None
         job.step(f"placing frame {n + 1} of {count}", 0.65 + 0.35 * (n + 1) / count, preview)
     store.drop_old_makes(project, chain_id, make)
-    return make, width, height, bad, plan, float(np.median(figure_heights)) if figure_heights else height * options["figure"]
+    empty = cut.figureless(measures)
+    wrong = cut.disagreeing(agreements, empty) if agreements else [k for k in bad if k not in set(empty)]
+    return make, width, height, wrong, empty, plan, float(np.median(figure_heights)) if figure_heights else height * options["figure"]
 
 
 def build(job, project, chain_id, source, options, realign=False, priors=None, extra=None):
@@ -282,17 +290,18 @@ def build(job, project, chain_id, source, options, realign=False, priors=None, e
             raise jobs.JobError("the source has changed since it was cut: cut it out again")
     else:
         measures, decided = _cut_pass(job, project, chain_id, count, frames, options, priors, video=source.get("kind") == "video")
-    make, width, height, bad, plan, figure_px = _place_pass(job, project, chain_id, frames, measures, decided, options)
-    record = {"source": source, "options": options, "method": decided, "frames": len(measures), "fps": fps,
-              "width": width, "height": height, "make": make, "suspects": bad, "measures": measures,
-              "plan": [[round(v, 3) for v in p] for p in plan], "figure_px": figure_px, "made": time.time()}
     if extra is None and earlier:
         extra = earlier.get("extra")            # what made the chain (Deforum's settings) outlives a new placing
+    drawn = bool(priors) or bool((extra or {}).get("deforum"))
+    make, width, height, bad, empty, plan, figure_px = _place_pass(job, project, chain_id, frames, measures, decided, options, drawn)
+    record = {"source": source, "options": options, "method": decided, "frames": len(measures), "fps": fps,
+              "width": width, "height": height, "make": make, "suspects": bad, "figureless": empty, "measures": measures,
+              "plan": [[round(v, 3) for v in p] for p in plan], "figure_px": figure_px, "made": time.time()}
     if extra:
         record["extra"] = extra
     store.write_chain(project, chain_id, record)
     return {"chain": chain_id, "make": make, "frames": len(measures), "fps": fps, "width": width, "height": height,
-            "suspects": bad, "method": decided, "figure": figure_px / height, "baseline": options["baseline"]}
+            "suspects": bad, "figureless": empty, "method": decided, "figure": figure_px / height, "baseline": options["baseline"]}
 
 
 def _known_figure(project, chain_id):

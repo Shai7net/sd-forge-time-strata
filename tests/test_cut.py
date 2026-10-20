@@ -122,6 +122,37 @@ class Align(unittest.TestCase):
         ms[20] = cut.measure(figure_alpha(half=40))
         ms[25] = {"empty": True, "width": 120, "height": 200}
         self.assertEqual(cut.suspects(ms), [20, 25])
+        self.assertEqual(cut.figureless(ms), [25])
+
+    def test_a_gap_between_shots_does_not_make_its_neighbours_suspect(self):
+        # (Four Elements: a whip pan left four frames with no figure or a sliver, and the three before them were
+        # called too large)
+        ms = self.measures()
+        sliver = np.zeros((200, 120), np.float32)
+        sliver[100:104, 50:70] = 1.0
+        for k in (21, 23):
+            ms[k] = cut.measure(sliver)
+        for k in (22, 24):
+            ms[k] = {"empty": True, "width": 120, "height": 200}
+        self.assertEqual(cut.figureless(ms), [21, 22, 23, 24])
+        self.assertEqual(cut.suspects(ms), [21, 22, 23, 24], "the figureless ones only (not believed when placing)")
+
+    def test_a_cut_is_judged_by_the_drawing_on_a_flat_backdrop(self):
+        frame = np.full((200, 120, 3), 128, np.uint8)
+        frame[30:190, 30:90] = (60, 160, 220)                 # what was drawn
+        right = np.zeros((200, 120), np.float32)
+        right[30:190, 30:90] = 1.0
+        kept, spill = cut.agreement(frame, right, (128, 128, 128))
+        self.assertGreater(kept, 0.99)
+        self.assertLess(spill, 0.01)
+        folded = frame.copy()
+        folded[80:150, 45:75] = 128                           # a grey fold of the robe, the backdrop's own colour
+        self.assertLess(cut.agreement(folded, right, (128, 128, 128))[1], 0.01, "inside the figure is not backdrop")
+        half = right.copy()
+        half[90:, :] = 0.0                                    # the body below the chest lost
+        wide = np.ones((200, 120), np.float32)                # the backdrop kept
+        found = [cut.agreement(frame, a, (128, 128, 128)) for a in (right, half, wide, np.zeros((200, 120), np.float32))]
+        self.assertEqual(cut.disagreeing(found, skip=[3]), [1, 2])
 
     def test_render_frame_places_and_never_brings_fog_back(self):
         a = figure_alpha()
