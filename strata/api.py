@@ -12,7 +12,7 @@ from urllib.parse import quote
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 
-from . import NAME, VERSION, chain, cut, deforum, dqt, export, jobs, store  # noqa: F401  (chain and deforum register their jobs)
+from . import NAME, VERSION, chain, cut, deforum, dqt, export, jobs, store, upscale  # noqa: F401  (chain and deforum register their jobs)
 
 _RANGE = re.compile(r"bytes=(\d*)-(\d*)")
 
@@ -36,7 +36,7 @@ def _deforum_present():
 
 def api_options():
     return {"name": NAME, "version": VERSION, "folder": store.root(), "exports": store.exports_dir(),
-            "models": cut.model_names(), "kinds": list(export.KINDS), "deforum": _deforum_present(),
+            "models": cut.model_names(), "kinds": list(export.KINDS), "deforum": _deforum_present(), "upscale": upscale.available(),
             "sim360": os.path.isdir(_sim360_root() or "")}
 
 

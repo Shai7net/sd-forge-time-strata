@@ -109,7 +109,7 @@
     function fillChain(c) {
         c.spine = Object.assign({}, Core.SPINE_DEFAULTS, c.spine);
         c.look = Object.assign({ fade: 0.35, tint: '#8fb8ff', tint_amount: 0.0, glow: 0, glow_color: '#5ff2ff', rib: 0.25, reverse: false, shadow: 0.35 }, c.look);
-        c.cut = Object.assign({ start: 0, end: null, fps: null, max_frames: 600, matte: 'auto', model: null, key_colour: null, crop: 'auto',
+        c.cut = Object.assign({ start: 0, end: null, fps: null, max_frames: 600, matte: 'auto', model: null, key_colour: null, crop: 'auto', upscale: null,
                                 align: 'centre', scale: 'steady', ground: 12, height: 768, figure: 0.84, baseline: 0.95 }, c.cut);
         c.time = Object.assign({}, Core.TIME_DEFAULTS, c.time);
         delete c.grow;
@@ -208,6 +208,23 @@
         Object.assign(c, { frames: result.frames, make: result.make, width: result.width, height: result.height, fps: result.fps,
                            figure: result.figure, baseline: result.baseline, suspects: result.suspects, method: result.method });
         if (c.to != null && c.to >= c.frames) c.to = null;
+        E.touch();
+        await E.loadFrames();
+        return result;
+    };
+
+    /* a chain cut again from its own source with Real-ESRGAN first (`choice` "model:scale"), at a frame `scale` times
+     * taller (at most 2048 px); a drawn chain keeps its backdrop's key and the motion it was drawn over */
+    E.sharpen = async function (id, choice, progress) {
+        const c = E.chain(id);
+        if (!c || !c.make) throw new Error('Make the chain first');
+        const scale = +String(choice).split(':')[1] || 2;
+        const job = await E.api('job/start', { kind: 'sharpen', params: { project: E.project, chain: id, upscale: choice,
+                                                                         height: Math.min(2048, Math.round((c.height || 768) * scale)) } });
+        const result = await E.waitJob(job, progress);
+        Object.assign(c, { frames: result.frames, make: result.make, width: result.width, height: result.height, fps: result.fps,
+                           figure: result.figure, baseline: result.baseline, suspects: result.suspects, method: result.method });
+        c.cut.upscale = choice; c.cut.height = result.height;
         E.touch();
         await E.loadFrames();
         return result;

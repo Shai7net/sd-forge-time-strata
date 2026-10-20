@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from . import cut, jobs, media, store
+from . import cut, jobs, media, store, upscale
 
 DEFAULTS = {
     "start": 0.0, "end": None, "fps": None, "max_frames": 600, "max_side": 1280,
@@ -21,6 +21,7 @@ DEFAULTS = {
     "low": 0.06, "high": 0.94, "keep_parts": 0.03, "holes": 0.0006, "prior_reach": 0.03,
     "align": "centre", "scale": "steady", "baseline": 0.95, "figure": 0.84, "smooth": 3.0, "ground": 12,
     "height": 768, "width": None,
+    "upscale": None,        # Real-ESRGAN before the cut, as "model:scale" (see upscale.CHOICES), for small footage
 }
 
 
@@ -267,9 +268,14 @@ def build(job, project, chain_id, source, options, realign=False, priors=None, e
             raise jobs.JobError("this chain has not been cut out yet")
         kept = dict(earlier.get("options") or {})
         kept.update({k: v for k, v in options.items() if v is not None})
+        kept["upscale"] = (earlier.get("options") or {}).get("upscale")     # (the cuts were measured on those frames)
         options = _options({"options": kept})
     job.step("reading the source", 0.01)
     count, frames, fps = _frames(project, source, options)
+    if options.get("upscale"):
+        # made larger once with Real-ESRGAN and kept beside the chain, so placing again reads the same frames
+        frames = upscale.upscaled_frames(job, os.path.join(store.chain_dir(project, chain_id, create=True), "upscale"),
+                                         count, frames, options["upscale"], (0.01, 0.04 if realign else 0.2))
     if realign:
         measures, decided = earlier["measures"], earlier["method"]
         if len(measures) != count:
@@ -287,6 +293,43 @@ def build(job, project, chain_id, source, options, realign=False, priors=None, e
     store.write_chain(project, chain_id, record)
     return {"chain": chain_id, "make": make, "frames": len(measures), "fps": fps, "width": width, "height": height,
             "suspects": bad, "method": decided, "figure": figure_px / height, "baseline": options["baseline"]}
+
+
+def _known_figure(project, chain_id):
+    """The motion a drawn chain was drawn over (its prior folder), as build()'s priors - or None."""
+    folder = os.path.join(store.chain_dir(project, chain_id), "prior")
+    if not os.path.isdir(folder):
+        return None
+
+    def priors(n, shape):
+        path = os.path.join(folder, f"{n:06d}.png")
+        if not os.path.isfile(path):
+            return None
+        prior = np.asarray(Image.open(path).convert("L"), np.float32) / 255.0
+        if prior.shape != tuple(shape):
+            prior = cv2.resize(prior, (shape[1], shape[0]), interpolation=cv2.INTER_LINEAR)
+        return prior
+    return priors
+
+
+@jobs.handler("sharpen")
+def sharpen(job):
+    """A chain cut again from its own source with Real-ESRGAN first, at a taller frame (a drawn chain keeps its
+    backdrop key and the motion it was drawn over). params: project, chain, upscale ("model:scale"), height"""
+    params = job.params
+    project = store.clean_name(params["project"])
+    chain_id = store.clean_id(params["chain"], "chain id")
+    record = store.read_chain(project, chain_id)
+    if not record or not record.get("source"):
+        raise jobs.JobError("this chain has not been made yet")
+    choice = params.get("upscale")
+    upscale.parse(choice)
+    options = dict(record.get("options") or {})
+    options["upscale"] = choice
+    if params.get("height"):
+        options["height"] = int(min(2048, max(256, int(params["height"]))))
+    return build(job, project, chain_id, record["source"], _options({"options": options}),
+                 priors=_known_figure(project, chain_id), extra=record.get("extra"))
 
 
 @jobs.handler("chain")

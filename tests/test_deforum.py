@@ -63,6 +63,20 @@ class Scenes(unittest.TestCase):
             self.assertIn("floor", negative)
 
 
+class SteadyLook(unittest.TestCase):
+    def test_each_scene_is_anchored_where_its_figure_is_largest(self):
+        scenes = [{"from": 0.0}, {"from": 1.0}, {"from": 2.0}]
+        measures = []
+        for k in range(36):            # 12 frames a second; a crouch in the first scene, a big stance at 5, 17, 30
+            area = 0.2 + (0.3 if k in (5, 17, 30) else 0.0)
+            measures.append({"area": area, "top": 100, "bottom": 600, "empty": k == 25})
+        self.assertEqual(deforum.anchor_frames(scenes, measures, 0, 35, 12), [5, 17, 30])
+
+    def test_without_measures_the_middle_is_taken_and_stays_in_range(self):
+        scenes = [{"from": 0.0}, {"from": 2.0}]
+        self.assertEqual(deforum.anchor_frames(scenes, [], 6, 30, 12), [15, 27])
+
+
 class Units(unittest.TestCase):
     def test_an_older_project_has_the_pose_alone_at_its_weight(self):
         units = deforum._units({"pose": 0.7})

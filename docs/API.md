@@ -102,8 +102,9 @@ All names below are relative to `/time-strata/`. POST bodies are JSON unless not
 
 | Method and route | Parameters / purpose |
 | --- | --- |
-| `GET options` | Version, data locations, matting models and export kinds |
+| `GET options` | Version, data locations, matting models, export kinds and the Real-ESRGAN upscaler (`upscale: {ready, models}`) |
 | `GET deforum/options` | Deforum presence, the ControlNet model and preprocessor found for each unit (`pose`, `depth`, `edges`, `shape`, `look`), the checkpoints, the loaded one and the last generation settings |
+| `POST job/start` with kind `sharpen` | `{project, chain, upscale: "model:scale", height}`: the chain cut again from its source with Real-ESRGAN first |
 | `GET dqt` | DeforumationQT's mediator, read only: `{running, values: {translation_x, translation_y, translation_z, rotation_x, rotation_y, fov}}` |
 | `GET projects` | Project list |
 | `GET project?name=...` | Read the scene document |
@@ -129,7 +130,7 @@ All names below are relative to `/time-strata/`. POST bodies are JSON unless not
 
 URL-encode query values and path segments. Job states are `waiting`, `running`, `done`, `failed` and `cancelled`. A running `deforum` job also reports `live: {frames, total, width, height, fps, path}`: the frames Deforum has drawn so far, already cut, at `file/{project}/{path}/{000000}.webp`.
 
-A `deforum` job's `options` may hold `scenes` (`[{from, text, texture, look}]`, seconds of the motion; `texture` and `look` are project paths), `blend` (seconds), `prefix`, `suffix`, `negative`, `fill` (`{amount, texture}`), `look`, `units` (`{pose|depth|edges|shape|look: {on, weight, start, end}}`), `checkpoint`, `sampler`, `steps`, `cfg`, `strength`, `seed`, `background`, `first`, `last` and `every`. Jobs are in memory, survive only for the current server process and retain up to 30 recent records subject to active jobs.
+A `deforum` job's `options` may hold `scenes` (`[{from, text, texture, look}]`, seconds of the motion; `texture` and `look` are project paths), `blend` (seconds), `prefix`, `suffix`, `negative`, `fill` (`{amount, texture}`), `look`, `units` (`{pose|depth|edges|shape|look: {on, weight, start, end}}`), `steady` (`{on, weight}`: anchor frames per scene held by IP-Adapter), `upscale` (`"realesr-animevideov3:2"`, `"realesrgan-x4plus:2"`, `"realesrgan-x4plus-anime:2"` or ×4), `checkpoint`, `sampler`, `steps`, `cfg`, `strength`, `seed`, `background`, `first`, `last` and `every`. Jobs are in memory, survive only for the current server process and retain up to 30 recent records subject to active jobs.
 
 ## Recording protocol
 

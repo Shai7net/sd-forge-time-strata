@@ -33,7 +33,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from . import chain, compat, cut, jobs, media, store
+from . import chain, compat, cut, jobs, media, store, upscale
 
 DEFAULTS = {
     "prompt": "", "stages": [], "scenes": [], "blend": 1.0,
@@ -43,6 +43,8 @@ DEFAULTS = {
     "units": None,          # ControlNet units, {kind: {on, weight, start, end}} (see UNITS); None: the pose alone
     "fill": None,           # {"amount": 0..1, "texture": path}: the figure filled with a texture before it is drawn
     "look": None,           # a picture whose look IP-Adapter gives every frame (a scene may have its own)
+    "upscale": None,        # the drawn frames made larger with Real-ESRGAN before their cut ("model:scale")
+    "steady": None,         # {"on", "weight"}: one anchor frame drawn first per scene gives the scene its look (IP-Adapter)
 }
 
 # What each ControlNet unit sees and which model and preprocessor it takes (found among the ones installed).
@@ -323,16 +325,19 @@ def _fill(canvas, alpha, texture, amount):
     return np.clip(photo * (1 - a) + mixed * a, 0, 255).astype(np.uint8)
 
 
-def _motion(job, project, source, folder, options, scenes, uses):
+def _motion(job, project, source, folder, options, scenes, uses, pick=None):
     """The motion chain's frames on the backdrop, padded to Deforum's sizes, as videos: the motion itself (what
     the pose, depth and edges are read from), the picture Deforum starts each frame from (the figure filled with
     its scene's texture, when there is one), where it may paint, the silhouette and the look pictures. Each
-    frame's figure (its alpha, padded the same way) is kept as the prior of the cut."""
+    frame's figure (its alpha, padded the same way) is kept as the prior of the cut. `pick`: these motion frames
+    instead of first/last/every (the anchors of a steady look)."""
     record = store.read_chain(project, source)
     if not record or not record.get("make"):
         raise jobs.JobError("the motion chain has not been made yet")
     frames = list(range(int(options["first"] or 0), int(options["last"] if options["last"] is not None else record["frames"] - 1) + 1,
                         max(1, int(options["every"] or 1))))
+    if pick is not None:
+        frames = list(pick)
     frames = [k for k in frames if 0 <= k < record["frames"]]
     if len(frames) < 2:
         raise jobs.JobError("choose at least two frames of the motion chain")
@@ -344,7 +349,7 @@ def _motion(job, project, source, folder, options, scenes, uses):
     shutil.rmtree(prior_folder, ignore_errors=True)
     os.makedirs(prior_folder)
     record_fps = float(record.get("fps") or 24)
-    fps = record_fps / max(1, int(options["every"] or 1))
+    fps = record_fps / max(1, int(options["every"] or 1)) if pick is None else record_fps
     times = [k / record_fps for k in frames]
 
     def writer(path):
@@ -545,7 +550,7 @@ class _Share:
         return getattr(self.job, name)
 
 
-def _watch(job, done, total):
+def _watch(job, done, total, part=(0.06, 0.9)):
     """Deforum's progress and its frame, while it draws (it reports through Forge's shared state)."""
     from modules import shared
     last_preview = 0
@@ -556,7 +561,7 @@ def _watch(job, done, total):
             share = state.job_no / state.job_count
             if state.sampling_steps:
                 share += state.sampling_step / state.sampling_steps / state.job_count
-        job.progress = 0.06 + 0.84 * min(max(share, 0.0), 1.0)
+        job.progress = part[0] + (part[1] - part[0]) * min(max(share, 0.0), 1.0)
         job.stage = f"Deforum is drawing frame {min(total, int(state.job_no) + 1)} of {total}"
         if time.time() - last_preview > 2:
             try:
@@ -638,6 +643,105 @@ def _put_back_checkpoint(title):
         print(f"[Time Strata] Forge's checkpoint could not be put back ({e}); choose it again in Forge")
 
 
+def _run(job, folder, motion, data, name, options, live=False, share=(0.06, 0.9)):
+    """One Deforum render of `data` into the chain's folder: its drawn frames' paths, in order. With `live`,
+    each frame is also cut and shown while Deforum goes on."""
+    out_root = os.path.join(folder, "deforum")
+    shutil.rmtree(out_root, ignore_errors=True)
+    os.makedirs(out_root)
+    settings_path = os.path.join(folder, f"{name}.json" if not live else "deforum_settings.json")
+    with open(settings_path, "w", encoding="utf8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=1)
+    import deforum_api
+    from modules import shared
+    from modules.call_queue import queue_lock
+    batch_id = f"timestrata({uuid.uuid4().hex[:8]})"
+    job_id = f"{batch_id}-0"
+    tracker = deforum_api.JobStatusTracker()
+    tracker.accept_job(batch_id=batch_id, job_id=job_id, deforum_settings=[data], options_overrides={})
+    job.on_cancel = lambda: shared.state.interrupt()
+    job.step("waiting for Forge (another drawing may be running)", 0.05)
+    done = threading.Event()
+    watcher = threading.Thread(target=_watch, args=(job, done, motion["frames"], share), daemon=True)
+    shower = threading.Thread(target=_live, args=(job, os.path.join(out_root, name), motion, folder, options, done), daemon=True)
+    with queue_lock:
+        if job.cancel_asked:
+            raise jobs.Cancelled()
+        watcher.start()
+        if live:
+            shower.start()
+        loaded = shared.opts.data.get("sd_model_checkpoint")
+        try:
+            with _WithoutDeforumation():
+                deforum_api.run_deforum_batch(batch_id, [job_id], [_File(settings_path)], {"outdir_samples": out_root})
+        finally:
+            done.set()
+            watcher.join(timeout=5)
+            if live:
+                shower.join(timeout=60)
+            if options.get("checkpoint"):
+                _put_back_checkpoint(loaded)
+    if job.cancel_asked or shared.state.interrupted:
+        raise jobs.Cancelled()
+    status = tracker.get(job_id)
+    outdir = getattr(status, "outdir", None) or os.path.join(out_root, name)
+    stamp = getattr(status, "timestring", None)
+    drawn = sorted(p for p in glob.glob(os.path.join(outdir, f"{stamp or '*'}_*.png")) if "_depth_" not in os.path.basename(p))
+    if not drawn:
+        message = getattr(status, "message", None)
+        raise jobs.JobError(f"Deforum drew no frames{': ' + str(message) if message else ''} (see Forge's console)")
+    return drawn
+
+
+def anchor_frames(scenes, measures, first, last, fps):
+    """The motion frame each scene's look is drawn from: where the figure is largest within the scene (a whole
+    standing body is the best look to hold; a crouch or a turn away is not), else the scene's middle."""
+    ends = [s["from"] for s in scenes[1:]] + [last / fps]
+    pick = []
+    for scene, end in zip(scenes, ends):
+        a, b = max(first, int(round(scene["from"] * fps))), min(last, int(round(end * fps)))
+        inside = [k for k in range(a, b + 1) if k < len(measures) and not measures[k].get("empty")]
+        if inside:
+            pick.append(max(inside, key=lambda k: measures[k].get("area", 0) * max(1, measures[k].get("bottom", 1) - measures[k].get("top", 0))))
+        else:
+            middle = int(round((max(scene["from"], first / fps) + end) / 2 * fps))
+            pick.append(min(max(first, middle), last))
+    return pick
+
+
+def _anchor_scenes(job, project, source, target, folder, options, scenes, units, uses, found, deforum_folder):
+    """A steady look: one frame of each scene is drawn first (the scene's middle), cut out, and becomes that
+    scene's look picture, so IP-Adapter gives every frame of the scene the same face, clothes and colours.
+    A scene that has a look picture of its own keeps it."""
+    record = store.read_chain(project, source)
+    fps = float(record.get("fps") or 24)
+    first = int(options["first"] or 0)
+    last = int(options["last"] if options["last"] is not None else record["frames"] - 1)
+    pick = anchor_frames(scenes, record.get("measures") or [], first, last, fps)
+    if len(pick) < 2:
+        pick = pick + [min(last, pick[0] + 1)]
+    anchors = os.path.join(folder, "anchors")
+    os.makedirs(anchors, exist_ok=True)
+    motion = _motion(_Share(job, 0.0, 0.01), project, source, anchors, options, scenes, uses - {"look"}, pick=pick)
+    data = settings(_base_settings(deforum_folder), motion, options, f"TimeStrata_{target}_anchors", scenes,
+                    dict(units, look=dict(units["look"], on=False)), found)
+    job.step("drawing one frame of each scene first, for a steady look", 0.01)
+    drawn = _run(job, anchors, motion, data, f"TimeStrata_{target}_anchors", options, share=(0.01, 0.05))
+    for i, scene in enumerate(scenes):
+        if scene.get("look") or i >= len(drawn):
+            continue
+        picture = np.asarray(Image.open(drawn[i]).convert("RGB"))
+        prior = np.asarray(Image.open(os.path.join(anchors, "prior", f"{i:06d}.png")).convert("L"))
+        ys, xs = np.nonzero(prior >= 128)
+        if len(ys):
+            pad = int(0.06 * picture.shape[0])
+            picture = picture[max(0, ys.min() - pad):ys.max() + pad, max(0, xs.min() - pad):xs.max() + pad]
+        path = os.path.join(anchors, f"look_{i}.png")
+        Image.fromarray(picture).save(path)
+        scene["look"] = store.relative(project, path)
+    shutil.rmtree(os.path.join(anchors, "deforum"), ignore_errors=True)
+
+
 @jobs.handler("deforum")
 def generate(job):
     """params: project, source (the motion chain), chain (the new chain), options (see DEFAULTS)"""
@@ -663,52 +767,27 @@ def generate(job):
             print(f"[Time Strata] no ControlNet model for '{kind}' was found: that unit is left out")
     uses = {kind for kind, unit in units.items() if unit["on"] and found["units"][kind]["model"]}
 
+    steady = options.get("steady") or {}
+    if steady.get("on") and found["units"]["look"]["model"]:
+        _anchor_scenes(job, project, source, target, folder, options, scenes, units, uses, found, deforum_folder)
+        units["look"] = dict(units["look"], on=True, weight=float(steady.get("weight") or 0.55), start=0.0, end=1.0)
+        uses = uses | {"look"}
+    elif steady.get("on"):
+        print("[Time Strata] a steady look needs an IP-Adapter ControlNet model; drawing without it")
+
     motion = _motion(job, project, source, folder, options, scenes, uses)
-    out_root = os.path.join(folder, "deforum")
-    shutil.rmtree(out_root, ignore_errors=True)
-    os.makedirs(out_root)
     name = f"TimeStrata_{target}"
     data = settings(_base_settings(deforum_folder), motion, options, name, scenes, units, found)
-    settings_path = os.path.join(folder, "deforum_settings.json")
-    with open(settings_path, "w", encoding="utf8") as file:
-        json.dump(data, file, ensure_ascii=False, indent=1)
 
-    import deforum_api
-    from modules import shared
-    from modules.call_queue import queue_lock
-    batch_id = f"timestrata({uuid.uuid4().hex[:8]})"
-    job_id = f"{batch_id}-0"
-    tracker = deforum_api.JobStatusTracker()
-    tracker.accept_job(batch_id=batch_id, job_id=job_id, deforum_settings=[data], options_overrides={})
-    job.on_cancel = lambda: shared.state.interrupt()
-    job.step("waiting for Forge (another drawing may be running)", 0.05)
-    done = threading.Event()
-    watcher = threading.Thread(target=_watch, args=(job, done, motion["frames"]), daemon=True)
-    shower = threading.Thread(target=_live, args=(job, os.path.join(out_root, name), motion, folder, options, done), daemon=True)
-    with queue_lock:
-        if job.cancel_asked:
-            raise jobs.Cancelled()
-        watcher.start()
-        shower.start()
-        loaded = shared.opts.data.get("sd_model_checkpoint")
-        try:
-            with _WithoutDeforumation():
-                deforum_api.run_deforum_batch(batch_id, [job_id], [_File(settings_path)], {"outdir_samples": out_root})
-        finally:
-            done.set()
-            watcher.join(timeout=5)
-            shower.join(timeout=60)
-            if options.get("checkpoint"):
-                _put_back_checkpoint(loaded)
-    if job.cancel_asked or shared.state.interrupted:
-        raise jobs.Cancelled()
-    status = tracker.get(job_id)
-    outdir = getattr(status, "outdir", None) or os.path.join(out_root, name)
-    stamp = getattr(status, "timestring", None)
-    drawn = sorted(p for p in glob.glob(os.path.join(outdir, f"{stamp or '*'}_*.png")) if "_depth_" not in os.path.basename(p))
+    try:
+        drawn = _run(job, folder, motion, data, name, options, live=True)
+    except BaseException:
+        # a drawing cancelled or failed leaves no live frames behind (the chain keeps what it had)
+        shutil.rmtree(os.path.join(folder, "live"), ignore_errors=True)
+        shutil.rmtree(os.path.join(folder, "deforum"), ignore_errors=True)
+        raise
     if not drawn:
-        message = getattr(status, "message", None)
-        raise jobs.JobError(f"Deforum drew no frames{': ' + str(message) if message else ''} (see Forge's console)")
+        raise jobs.JobError("Deforum drew no frames (see Forge's console)")
 
     # the drawn frames become the new chain's source, in order
     pictures = os.path.join(folder, "source")
@@ -716,7 +795,7 @@ def generate(job):
     os.makedirs(pictures)
     for n, path in enumerate(drawn[:motion["frames"]]):
         shutil.copyfile(path, os.path.join(pictures, f"{n:06d}.png"))
-    shutil.rmtree(out_root, ignore_errors=True)         # Deforum's own copies and its extracted input frames
+    shutil.rmtree(os.path.join(folder, "deforum"), ignore_errors=True)    # Deforum's own copies and its extracted frames
 
     prior_folder = os.path.join(folder, "prior")
 
@@ -730,8 +809,11 @@ def generate(job):
         return prior
 
     record = motion["record"]
+    # sharper drawn frames: Real-ESRGAN before the cut, and a taller chain frame to keep what it adds
+    sharper = upscale.parse(options.get("upscale"))
+    height = int(min(2048, record["height"] * sharper[1])) if sharper else record["height"]
     cut_options = chain._options({"options": {
-        "matte": "keymodel", "key_colour": str(options["background"]), "height": record["height"],
+        "matte": "keymodel", "key_colour": str(options["background"]), "height": height, "upscale": options.get("upscale"),
         "align": "centre", "scale": "steady", "figure": (record.get("options") or {}).get("figure", 0.84),
         "baseline": (record.get("options") or {}).get("baseline", 0.95), "max_frames": len(drawn),
         "prior_reach": 0.012,       # the drawn figure follows the motion closely (its pose and its picture)

@@ -369,6 +369,7 @@
         const progress = progressBox('cut:' + c.id);
         progress.dataset.place = 'cut:' + c.id;
         const cut = c.cut;
+        const sharpness = upscaleChoices();
         const allModels = E.options && E.options.models || [];
         const models = allModels.filter(m => m.kind !== 'video').map(m => [m.name, m.name + (m.heavy ? T(' (too big for this card: very slow)') : m.ready ? '' : T(' (downloads first)'))]);
         const videoModels = allModels.filter(m => m.kind === 'video' && m.ready).map(m => [m.name, m.name === 'rvm' ? T('RVM (best)') : T('RVM (fast)')]);
@@ -389,7 +390,16 @@
                       'Held: the chain runs straight through the body and a shaking camera is taken out. With its sway: only slow drifting is taken out.'),
                 field('Size', select(cut, 'scale', [['steady', 'One size for all'], ['follow', 'Every frame the same height']]), 'One size keeps growing and shrinking as filmed (a baby growing up stays visible)'),
                 field('Ground', select(cut, 'ground', [[12, 'Keep jumps'], [0, 'Feet always on the ground']]), 'Keep jumps: the feet may leave the ground line, as when the figure jumps. Feet always on the ground: for a video whose camera moves up and down'),
-                field('Frame height', select(cut, 'height', [512, 640, 768, 1024, 1280].map(v => [v, v + ' px'])))),
+                field('Frame height', select(cut, 'height', [512, 640, 768, 1024, 1280, 1536, 2048].map(v => [v, v + ' px'])))),
+            sharpness ? row(field('Sharper (Real-ESRGAN)', select(cut, 'upscale', sharpness),
+                                  'Small or soft footage made larger before the cut (choose a taller frame height too). The video model is fast; the photo model brings the most detail, slowly')) : null,
+            c.make && sharpness ? row(field('Make these frames sharper', select(UI, 'sharpenChoice', sharpness.filter(([v]) => v)),
+                                            'Cuts the chain again from its own source with Real-ESRGAN first, at a taller frame (a drawn chain keeps its key and its motion)'),
+                                      button('Make them sharper', async () => {
+                                          const choice = UI.sharpenChoice || 'realesr-animevideov3:2';
+                                          await run(progress, p => E.sharpen(c.id, choice, p));
+                                          say(T('Sharper: {0} frames of {1}×{2}', c.frames, c.width, c.height), 'ok'); renderPanel();
+                                      })) : null,
             row(button(c.make ? 'Cut out again' : 'Cut out and make the chain', async () => {
                     if (!UI.files || !UI.files.length) {
                         if (!c.source) throw new Error('Choose a video or pictures first');
@@ -515,6 +525,18 @@
         return h('div', { class: 'ts-progress' });
     }
 
+    /* the Real-ESRGAN choices (Deforum's own upscaler), or null when the page does not know of them */
+    function upscaleChoices() {
+        const info = E.options && E.options.upscale;
+        if (!info) return null;
+        const labels = { 'realesr-animevideov3': 'video model', 'realesrgan-x4plus': 'photo model', 'realesrgan-x4plus-anime': 'anime model' };
+        const notes = { 'realesr-animevideov3': ' (fast)', 'realesrgan-x4plus': ' (most detail, slow)', 'realesrgan-x4plus-anime': '' };
+        const out = [[null, T('No')]];
+        for (const name of Object.keys(labels))
+            for (const scale of [2, 4]) out.push([`${name}:${scale}`, `${T(labels[name])} ×${scale}${notes[name] ? T(notes[name]) : ''}`]);
+        return out;
+    }
+
     /* a job's progress shown under its buttons, with the frame it is on */
     async function run(box, work) {
         if (UI.busyWork) throw new Error('Something is already being made; wait for it');
@@ -562,11 +584,12 @@
     // ready-made scenes: original descriptions, spread over the motion's length
     const SCENE_SETS = {
         life: { label: 'A life: a baby to old age', blend: 1.2, texts: ['a baby', 'a small child', 'a young adult', 'a middle-aged adult', 'a very old person'], who: true },
+        // (a figure "made of" water or mist is drawn bare: a robed warrior surrounded by the element is not)
         elements: { label: 'Four elements', blend: 1.0, texts: [
-            'a graceful figure made entirely of flowing clear water, liquid translucent body, splashing droplets, full body',
-            'a figure made of cracked stone and dark earth, moss and small glowing crystals, rocky body, full body',
-            'a figure made of living flames and glowing embers, burning body, rising sparks, full body',
-            'a figure made of swirling white wind and mist, airy translucent body, flowing ribbons of air, full body'] },
+            'a water warrior in long flowing robes of deep blue, surrounded by swirling water and splashing droplets, full body',
+            'an earth warrior in a full suit of heavy rock armor covering the whole body, moss and glowing amber crystals, full body',
+            'a fire warrior in long robes of dark red, surrounded by living flames and glowing embers, rising sparks, full body',
+            'an air warrior in long layered robes of white and pale grey, surrounded by swirling wind and ribbons of mist, full body'] },
     };
 
     /* a picture or video for a field, from the computer (kept in the project's uploads) */
@@ -599,6 +622,7 @@
                                     strength: 0.3, pose: 0.9, seed: 1234, background: '#808080', first: 0, last: null, every: 1, look: null }, G.options);
         const O = G.options;
         O.fill = Object.assign({ amount: 0, texture: null }, O.fill);
+        O.steady = Object.assign({ on: false, weight: 0.55 }, O.steady);
         // an older project's pose weight becomes the pose unit
         const units = O.units = O.units || { pose: { on: (O.pose == null ? 0.9 : O.pose) > 0, weight: O.pose == null ? 0.9 : O.pose } };
         for (const [kind, , , defaults] of UNITS) units[kind] = Object.assign({}, defaults, units[kind]);
@@ -687,7 +711,11 @@
         put(body, section('ControlNet', true,
             note('What holds each drawn frame to the motion. The pose is enough for a person; for a figure made of something else add the silhouette, and depth or edges for more of the body.'),
             grid,
-            units.look.on ? row(filePick('Look picture', O, 'look', 'image/*,video/*')) : null));
+            units.look.on ? row(filePick('Look picture', O, 'look', 'image/*,video/*')) : null,
+            row(field('Keep the look steady', check(O.steady, 'on', () => renderPanel()),
+                      'One frame of each scene is drawn first; IP-Adapter then gives every frame of that scene its face, clothes and colours, so they do not change from frame to frame'),
+                O.steady.on ? field('How strongly', slider(O.steady, 'weight', { min: 0.2, max: 1.2, step: 0.05 })) : null,
+                O.steady.on && found.look && !found.look.model ? h('span', { class: 'ts-missing' }, T('needs an IP-Adapter model')) : null)));
 
         put(body, section('Drawing', true,
             info.checkpoints && info.checkpoints.length ? row(field('Checkpoint', select(O, 'checkpoint', [[null, T('the one Forge has loaded') + (info.checkpoint ? ` (${String(info.checkpoint).split(' [')[0]})` : '')],
@@ -695,7 +723,9 @@
                                                                    'The model Deforum draws with; Forge\'s own is put back when it is done')) : null,
             row(field('Sampler', text(O, 'sampler')), field('Steps', number(O, 'steps', { min: 1, max: 150, step: 1 })),
                 field('CFG', number(O, 'cfg', { min: 0, max: 30 })), field('Seed', number(O, 'seed', { step: 1 }))),
-            row(field('The motion frame kept', slider(O, 'strength', { min: 0.1, max: 0.9, step: 0.02 }), 'How much of the motion frame stays (Deforum\'s strength): less keeps the person, more lets the prompt draw a new one')),
+            row(field('The motion frame kept', slider(O, 'strength', { min: 0.1, max: 0.9, step: 0.02 }), 'How much of the motion frame stays (Deforum\'s strength): less keeps the person, more lets the prompt draw a new one'),
+                upscaleChoices() ? field('Sharper drawn frames (Real-ESRGAN)', select(O, 'upscale', upscaleChoices()),
+                                         'Each drawn frame is made larger before it is cut, and the chain\'s frames are that much taller: sharp close-ups. Deforum\'s own upscaler') : null),
             row(field('Backdrop', colour(O, 'background'), 'The flat colour the figure is drawn on, and cut away by'),
                 field('First frame', number(O, 'first', { min: 0, step: 1 })), field('Last frame', number(O, 'last', { min: 0, step: 1, empty: null, placeholder: T('last') })),
                 field('Every', number(O, 'every', { min: 1, step: 1 }), 'Draw every n-th frame of the motion (fewer frames, faster)')),
