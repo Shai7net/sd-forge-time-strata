@@ -120,18 +120,36 @@ def _cut_pass(job, project, chain_id, count, frames, options, priors=None, video
     os.makedirs(folder, exist_ok=True)
     for name in os.listdir(folder):
         os.remove(os.path.join(folder, name))
+    override = None
     try:
-        return _cut_frames(job, folder, count, frames, options, priors, video, [], time.time())
+        for attempt in range(3):
+            try:
+                measures, decided = _cut_frames(job, folder, count, frames, options, priors, video, [], time.time(), override)
+                return _steady_suspects(job, folder, measures), decided
+            except cut.NoRoom as e:
+                # never a chain cut half with one model and half with another: start again from its first frame
+                cut.release_models()
+                cut.free_graphics_memory()
+                if attempt == 0:
+                    job.step(f"not enough graphics memory ({e}): freeing it and starting again", 0.03)
+                    continue
+                fallback = "rvm" if video and cut.rvm_ready("rvm") else "u2net"
+                job.step(f"not enough graphics memory ({e}): cutting with {fallback} instead", 0.03)
+                override = {"matte": "rvm" if fallback == "rvm" else "model", "model": fallback,
+                            "fallback": f"{e}; cut with {fallback} instead"}
+        raise jobs.JobError("the graphics card has too little free memory for any cut-out model")
     finally:
-        # a cut-out model holds up to 6 GB of the graphics card (BiRefNet); Forge needs it back for drawing
+        # a cut-out model holds up to 4-6 GB of the graphics card (BiRefNet); Forge needs it back for drawing
         cut.release_models()
 
 
-def _cut_frames(job, folder, count, frames, options, priors, video, measures, started):
+def _cut_frames(job, folder, count, frames, options, priors, video, measures, started, override=None):
     decided, matter = None, None
     for n, frame in enumerate(frames()):
         if decided is None:
             decided = _decide(frame, options, video)
+            if override:
+                decided.update(override)
             if decided["matte"] in ("rvm", "model"):
                 cut.free_graphics_memory()
             if decided["matte"] == "rvm":
@@ -151,6 +169,42 @@ def _cut_frames(job, folder, count, frames, options, priors, video, measures, st
     if not measures:
         raise jobs.JobError("the source gave no frames")
     return measures, decided
+
+
+def _steady_suspects(job, folder, measures, reach=0.04, around=3):
+    """A frame whose cut jumps from its neighbours (cut.suspects) usually kept a piece of the background: a lit
+    pillar beside the figure, a sign. In a stack one such frame flashes as a sliver, and its height shrank the
+    whole chain (his disco clip, 2026-10-20). Such a frame keeps only what lies near where the figure is in the
+    good frames around it (`around` on each side), `reach` of the height further at most; then it is measured
+    again. A real movement (an arm swung out) is covered by the neighbours; something that is there for one or
+    two frames only is not."""
+    bad = set(cut.suspects(measures))
+    if not bad:
+        return measures
+    count = len(measures)
+    cleaned = 0
+    for k in sorted(bad):
+        if measures[k].get("empty"):
+            continue
+        neighbours = [j for j in range(k - around, k + around + 1)
+                      if 0 <= j < count and j != k and j not in bad and not measures[j].get("empty")]
+        if not neighbours:
+            continue
+        union = None
+        for j in neighbours:
+            solid = _load_alpha(os.path.join(folder, f"{j:06d}.png")) >= 0.5
+            union = solid if union is None else union | solid
+        alpha = _load_alpha(os.path.join(folder, f"{k:06d}.png"))
+        h = alpha.shape[0]
+        allowed = cv2.dilate(union.astype(np.uint8), cut._disk(reach * h)).astype(np.float32)
+        allowed = cv2.GaussianBlur(allowed, (0, 0), max(1.0, reach / 4 * h))
+        steadied = alpha * np.clip(allowed * 2.0, 0.0, 1.0)
+        steadied[steadied < 1.5 / 255] = 0.0
+        _save_alpha(os.path.join(folder, f"{k:06d}.png"), steadied)
+        measures[k] = cut.measure(steadied)
+        cleaned += 1
+    job.step(f"steadied {cleaned} frames whose cut jumped", 0.66)
+    return measures
 
 
 def _place_pass(job, project, chain_id, frames, measures, decided, options):

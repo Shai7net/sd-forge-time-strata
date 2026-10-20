@@ -193,38 +193,80 @@ def _download_birefnet(model, step=None):
     return target
 
 
+class NoRoom(RuntimeError):
+    """The graphics card has too little free memory for a model (what it needs and what there is, in the text)."""
+
+
+# What BiRefNet-lite needs on the card, measured 2026-10-20 on an 8 GB laptop card (onnxruntime 1.22, 1024x1024):
+# in full precision more than 5.5 GB (6 GB worked), in half precision more than 3 GB (4 GB worked, 0.36 s a
+# frame, its cut 99.95% the same as full precision's). The half-precision copy is used whenever it is there.
+BIREFNET_NEEDS_GB = {"fp16": 3.9, "fp32": 6.0}
+
+
+def _birefnet_file(model):
+    """(path, precision) of a BiRefNet model: its half-precision copy when there is one (<model>.fp16.onnx)."""
+    import os
+    home = _rembg_home(model)
+    half = os.path.join(home, f"{model}.fp16.onnx")
+    if os.path.isfile(half):
+        return half, "fp16"
+    return os.path.join(home, f"{model}.onnx"), "fp32"
+
+
+def _free_card_gb():
+    try:
+        import torch
+        return torch.cuda.mem_get_info()[0] / 1024 ** 3 if torch.cuda.is_available() else None
+    except Exception:
+        return None
+
+
 class _BiRefNet:
     """BiRefNet run directly (not through rembg: Forge may load another extension's older rembg, without it).
-    The picture at 1024x1024, ImageNet's normalisation, a sigmoid; held inside the card's free memory."""
+    The picture at 1024x1024, ImageNet's normalisation, a sigmoid; held inside the card's free memory. When the
+    card has too little free memory for it, it says so (NoRoom) instead of failing part-way through a chain."""
     MEAN = np.array([0.485, 0.456, 0.406], np.float32)
     STD = np.array([0.229, 0.224, 0.225], np.float32)
 
-    def __init__(self, path):
+    def __init__(self, path, precision="fp32"):
         import onnxruntime as ort
         _cuda_libraries()
-        cuda = dict(_BIREFNET_CUDA, gpu_mem_limit=str(_free_card_bytes()))
+        need, free = BIREFNET_NEEDS_GB[precision], _free_card_gb()
+        if free is not None and free - 0.4 < need:
+            raise NoRoom(f"BiRefNet-lite ({precision}) needs about {need:.1f} GB of the graphics card and {free:.1f} GB is free")
+        cuda = dict(_BIREFNET_CUDA, gpu_mem_limit=str(_free_card_bytes(margin=0.4)))
         self.session = ort.InferenceSession(path, providers=[("CUDAExecutionProvider", cuda), "CPUExecutionProvider"])
         self.input = self.session.get_inputs()[0].name
+        self.precision = precision
 
     def __call__(self, rgb):
         h, w = rgb.shape[:2]
         size = (1024, 1024)
         im = cv2.resize(np.ascontiguousarray(rgb[..., :3]), size, interpolation=cv2.INTER_AREA if max(h, w) > 1024 else cv2.INTER_CUBIC)
         im = (im.astype(np.float32) / 255.0 - self.MEAN) / self.STD
-        out = self.session.run(None, {self.input: np.ascontiguousarray(im.transpose(2, 0, 1)[None])})[0][0, 0]
+        try:
+            out = self.session.run(None, {self.input: np.ascontiguousarray(im.transpose(2, 0, 1)[None])})[0][0, 0]
+        except Exception as e:
+            if "Available memory" in str(e) or "BFCArena" in str(e) or "out of memory" in str(e).lower():
+                raise NoRoom(f"BiRefNet-lite ({self.precision}) ran out of graphics memory") from e
+            raise
         pred = 1.0 / (1.0 + np.exp(-out.astype(np.float32)))
         return np.clip(cv2.resize(pred, (w, h), interpolation=cv2.INTER_LINEAR), 0.0, 1.0)
 
 
+def _birefnet_session(model, step=None):
+    import os
+    path, precision = _birefnet_file(model)
+    if not os.path.isfile(path):
+        path, precision = _download_birefnet(model, step), "fp32"
+    return _BiRefNet(path, precision)
+
+
 def prepare_model(model, step=None):
     """A picture model made ready before the first frame (downloaded first, when it has to be, with its progress
-    told to `step`)."""
-    import os
+    told to `step`). Raises NoRoom when the card has too little free memory for it."""
     if model.startswith("birefnet") and model not in _sessions:
-        path = os.path.join(_rembg_home(model), f"{model}.onnx")
-        if not os.path.isfile(path):
-            path = _download_birefnet(model, step)
-        _sessions[model] = _BiRefNet(path)
+        _sessions[model] = _birefnet_session(model, step)
 
 
 def model_matte(rgb, model="u2net", step=None):
@@ -234,10 +276,7 @@ def model_matte(rgb, model="u2net", step=None):
     from PIL import Image
     if model.startswith("birefnet"):
         if model not in _sessions:
-            path = os.path.join(_rembg_home(model), f"{model}.onnx")
-            if not os.path.isfile(path):
-                path = _download_birefnet(model, step)
-            _sessions[model] = _BiRefNet(path)
+            _sessions[model] = _birefnet_session(model, step)
         return _sessions[model](rgb)
     if model not in _sessions:
         _cuda_libraries()
@@ -304,11 +343,15 @@ def _disk(radius):
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
 
 
-def clean_alpha(alpha, low=0.06, high=0.94, keep_parts=0.03, holes=0.0006, reach=0.012, prior=None, prior_reach=0.03):
+def clean_alpha(alpha, low=0.06, high=0.94, keep_parts=0.03, holes=0.0006, reach=0.012, prior=None, prior_reach=0.03,
+                floating=0.3):
     """A matte made safe to stack.
     - below `low` is exactly 0 and above `high` exactly 1 (no fog, no see-through body);
     - parts smaller than `keep_parts` of the largest are removed, with their soft edges (`reach`: how far,
       as a share of the picture's height, a soft edge may lie from a solid part);
+    - a separate part that lies mostly above the figure's head or below its feet (less than `floating` of its own
+      height beside the figure) is removed: light falling from a ceiling, a sign, a lamp. A second figure stands
+      beside the first and stays. (A disco clip's light streaks made its "figure" twice as tall as it was.)
     - holes inside the figure smaller than `holes` of the picture are filled;
     - with a `prior` (where the figure is known to be, e.g. the motion clip it was generated from), nothing
       further than `prior_reach` (a share of the height) from it is kept."""
@@ -324,6 +367,16 @@ def clean_alpha(alpha, low=0.06, high=0.94, keep_parts=0.03, holes=0.0006, reach
         return np.zeros_like(a)
     areas = stats[1:, cv2.CC_STAT_AREA]
     kept = 1 + np.nonzero(areas >= keep_parts * areas.max())[0]
+    if floating and len(kept) > 1:
+        main = 1 + int(np.argmax(areas))
+        top, bottom = stats[main, cv2.CC_STAT_TOP], stats[main, cv2.CC_STAT_TOP] + stats[main, cv2.CC_STAT_HEIGHT]
+        beside = []
+        for n in kept:
+            y, bh = stats[n, cv2.CC_STAT_TOP], stats[n, cv2.CC_STAT_HEIGHT]
+            overlap = max(0, min(bottom, y + bh) - max(top, y))
+            if n == main or overlap >= floating * bh:
+                beside.append(n)
+        kept = np.array(beside)
     solid = np.isin(labels, kept).astype(np.uint8)
     a *= cv2.dilate(solid, _disk(max(2.0, reach * h))).astype(np.float32)
     if holes > 0:

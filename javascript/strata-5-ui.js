@@ -290,6 +290,7 @@
             row(field('Hold the figure', select(cut, 'align', [['centre', 'Body held in the middle'], ['sway', 'In the middle, with its sway'], ['keep', 'Where it was filmed']]),
                       'Held: the chain runs straight through the body and a shaking camera is taken out. With its sway: only slow drifting is taken out.'),
                 field('Size', select(cut, 'scale', [['steady', 'One size for all'], ['follow', 'Every frame the same height']]), 'One size keeps growing and shrinking as filmed (a baby growing up stays visible)'),
+                field('Ground', select(cut, 'ground', [[12, 'Keep jumps'], [0, 'Feet always on the ground']]), 'Keep jumps: the feet may leave the ground line, as when the figure jumps. Feet always on the ground: for a video whose camera moves up and down'),
                 field('Frame height', select(cut, 'height', [512, 640, 768, 1024, 1280].map(v => [v, v + ' px'])))),
             row(button(c.make ? 'Cut out again' : 'Cut out and make the chain', async () => {
                     if (!UI.files || !UI.files.length) {
@@ -304,8 +305,10 @@
             progress));
         if (c.make) {
             const suspects = (c.suspects || []).length;
-            put(body, note('{0} frames, {1}x{2}, {3} a second. Background: {4}.', c.frames, c.width, c.height, fmt(c.fps, 1),
-                             T({ model: 'a model', key: 'a flat colour', alpha: 'its own transparency' }[c.method && c.method.matte] || '-')),
+            const method = c.method || {};
+            const how = T({ model: 'a model', rvm: 'a model', key: 'a flat colour', alpha: 'its own transparency' }[method.matte] || '-') + (method.model ? ` (${method.model})` : '');
+            put(body, note('{0} frames, {1}x{2}, {3} a second. Background: {4}.', c.frames, c.width, c.height, fmt(c.fps, 1), how),
+                        method.fallback ? h('div', { class: 'ts-warn' }, T('Not enough graphics memory for the best model: {0}. Close what else uses the graphics card and cut it out again for the best cut.', method.fallback)) : null,
                         suspects ? h('div', { class: 'ts-warn' }, T('{0} frames look wrongly cut: {1}', suspects, c.suspects.slice(0, 12).join(', ') + (suspects > 12 ? '…' : ''))) : null);
         }
 

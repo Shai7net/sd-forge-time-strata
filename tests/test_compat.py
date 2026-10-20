@@ -38,6 +38,16 @@ class Memory(unittest.TestCase):
         legacy.unload_all_models.assert_called_once_with()
         modern.unload_all_models.assert_not_called()
 
+    def test_both_loaded_are_both_freed(self):
+        # an older Forge with Forge 2 files: its checkpoint is held by ldm_patched while backend is imported too;
+        # freeing only backend left the checkpoint on the card and BiRefNet ran out of memory (2026-10-20)
+        legacy, modern = Mock(), Mock()
+        modules = {"ldm_patched.modules.model_management": legacy, "backend.memory_management": modern}
+        self.assertTrue(self.run_adapter(dict(modules), modules))
+        legacy.unload_all_models.assert_called_once_with()
+        modern.unload_all_models.assert_called_once_with()
+        legacy.soft_empty_cache.assert_called_once_with()
+
     def test_unavailable_host_is_nonfatal(self):
         with patch("builtins.print"):
             self.assertFalse(self.run_adapter({}, {}))

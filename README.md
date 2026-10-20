@@ -122,6 +122,10 @@ Time Strata prepares Video Input and pose guidance, uses a flat backdrop, and fi
 
 Extraction uses ONNX Runtime's CUDA provider when available, with CPU as fallback. Speed and memory use depend on the model, provider, footage and hardware. Full-size BiRefNet models can be substantially heavier than the lite variant. RVM files must be supplied manually.
 
+**Graphics memory and BiRefNet-lite.** Before a cut, Time Strata asks every memory manager the host has loaded to release its models (a Forge with files of two generations can have both). BiRefNet-lite needs about 6 GB in full precision and under 4 GB in half precision, with practically the same cut (99.95% overlap on test footage). A half-precision copy (`birefnet-general-lite.fp16.onnx` beside the original in `models/time-strata`) is used automatically when present; make it once with `tools/make_birefnet_fp16.py` (the script's header shows a one-line `uv` command that keeps Forge's environment untouched). When the card still has too little free memory, the chain is cut again from its first frame with a lighter model (RVM for videos, u2net otherwise) and the chain's panel says so, instead of failing part-way.
+
+**Steadier cuts.** A frame whose cut jumps from its neighbours keeps only what lies near the figure in the frames around it, and separate pieces that lie mostly above the head or below the feet (stage lights, signs) are removed. For footage whose camera moves up and down, choose **Ground → Feet always on the ground**.
+
 ## API and development
 
 Routes are available at **`/time-strata`** on Forge's own server. No additional server or `--api` flag is needed for these routes. See the [API guide](docs/API.md) for JavaScript, Python and curl examples.
