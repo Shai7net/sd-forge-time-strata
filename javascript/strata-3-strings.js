@@ -13,6 +13,10 @@
         [/^cutting out frame (\d+) of (\d+) \(about (\d+) s left\)$/, 'חיתוך פריים $1 מתוך $2 (עוד כ-$3 שניות)'],
         [/^placing frame (\d+) of (\d+)$/, 'מיקום פריים $1 מתוך $2'],
         [/^uploading (\d+) of (\d+)$/, 'העלאה $1 מתוך $2'],
+        [/^cutting out with (.+)$/, 'חיתוך עם $1'],
+        [/^steadied (\d+) frames whose cut jumped$/, 'יוצבו $1 פריימים שהחיתוך שלהם קפץ'],
+        [/^not enough graphics memory \((.+)\): freeing it and starting again$/, 'אין מספיק זיכרון בכרטיס המסך ($1): משחרר ומתחיל מחדש'],
+        [/^not enough graphics memory \((.+)\): cutting with (.+) instead$/, 'אין מספיק זיכרון בכרטיס המסך ($1): חותך עם $2 במקום'],
     ];
 
     /* T('Leads to {0}', name): the text in the page's language, with the values put in */
@@ -105,6 +109,11 @@
         'Every frame the same height': 'כל פריים באותו גובה',
         'One size keeps growing and shrinking as filmed (a baby growing up stays visible)': 'גודל אחד שומר על הגדילה וההתכווצות כמו שצולמו (תינוק שגדל נשאר נראה)',
         'Frame height': 'גובה פריים',
+        'Ground': 'קרקע',
+        'Keep jumps': 'לשמור על קפיצות',
+        'Feet always on the ground': 'הרגליים תמיד על הקרקע',
+        'Keep jumps: the feet may leave the ground line, as when the figure jumps. Feet always on the ground: for a video whose camera moves up and down':
+            'לשמור על קפיצות: הרגליים יכולות לעזוב את קו הקרקע, כמו בקפיצה. הרגליים תמיד על הקרקע: לווידאו שהמצלמה שלו זזה למעלה ולמטה',
         'Cut out again': 'חיתוך מחדש',
         'Cut out and make the chain': 'חיתוך ויצירת השרשרת',
         'Choose a video or pictures first': 'בחר קודם וידאו או תמונות',
@@ -115,6 +124,8 @@
         'Cancel': 'ביטול',
         '{0} frames, {1}x{2}, {3} a second. Background: {4}.': '{0} פריימים, {1}x{2}, {3} בשנייה. רקע: {4}.',
         'a model': 'מודל',
+        'Not enough graphics memory for the best model: {0}. Close what else uses the graphics card and cut it out again for the best cut.':
+            'לא היה מספיק זיכרון בכרטיס המסך למודל הטוב ביותר: {0}. סגור מה שעוד משתמש בכרטיס המסך וחתוך שוב לחיתוך הטוב ביותר.',
         'a flat colour': 'צבע אחיד',
         'its own transparency': 'השקיפות שלו',
         '{0} frames look wrongly cut: {1}': '{0} פריימים נראים חתוכים לא נכון: {1}',

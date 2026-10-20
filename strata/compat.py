@@ -6,12 +6,15 @@ import sys
 
 
 def free_graphics_memory():
-    """Use the host's loaded memory manager before trying other Forge layouts."""
+    """Ask every memory manager the host has loaded to let its models go. A Forge can have more than one loaded:
+    an older Forge with Forge 2 files beside it loads its checkpoint through ldm_patched while backend is imported
+    too, and freeing only the first one found (backend) left the checkpoint on the card, so a cut-out model ran
+    out of memory (2026-10-20). Each manager frees what it holds; one that holds nothing costs nothing. When none
+    is loaded yet, the known layouts are tried in turn."""
     names = ("backend.memory_management", "ldm_patched.modules.model_management")
-    ordered = [name for name in names if name in sys.modules]
-    ordered += [name for name in names if name not in ordered]
-    errors = []
-    for name in ordered:
+    loaded = [name for name in names if name in sys.modules]
+    errors, freed = [], False
+    for name in loaded or names:
         try:
             manager = importlib.import_module(name)
         except ImportError:
@@ -19,12 +22,15 @@ def free_graphics_memory():
         try:
             manager.unload_all_models()
             manager.soft_empty_cache()
-            return True
+            freed = True
         except Exception as error:
             errors.append(f"{name}: {type(error).__name__}: {error}")
-    detail = "; ".join(errors) or "no supported Forge memory manager found"
-    print(f"[Time Strata] could not free graphics memory: {detail}")
-    return False
+        if freed and not loaded:
+            break
+    if not freed:
+        detail = "; ".join(errors) or "no supported Forge memory manager found"
+        print(f"[Time Strata] could not free graphics memory: {detail}")
+    return freed
 
 
 def deforum_dir():

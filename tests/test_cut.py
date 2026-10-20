@@ -35,6 +35,15 @@ class Clean(unittest.TestCase):
         self.assertEqual(float(clean[6, 6]), 0.0)
         self.assertEqual(float(clean[120, 108]), 1.0)
 
+    def test_light_from_above_goes_and_a_second_figure_stays(self):
+        a = figure_alpha(x=40)
+        a[0:18, 30:60] = 1.0                          # light falling from the ceiling, above the head
+        a[40:190, 90:112] = 1.0                       # a second figure beside the first
+        clean = cut.clean_alpha(a)
+        self.assertEqual(float(clean[0:18, 30:60].max()), 0.0)
+        self.assertEqual(float(clean[120, 100]), 1.0)
+        self.assertEqual(float(clean[100, 40]), 1.0)
+
     def test_small_holes_inside_are_filled(self):
         a = figure_alpha()
         a[100:103, 58:61] = 0.0
@@ -124,6 +133,32 @@ class Align(unittest.TestCase):
         self.assertEqual(int(((alpha > 0) & (alpha < 2)).sum()), 0)
         ys, xs = np.nonzero(alpha > 128)
         self.assertAlmostEqual(xs.mean(), 0.6 * 60 + 10, delta=1.5)
+
+
+class Steady(unittest.TestCase):
+    def test_a_piece_that_is_there_for_one_frame_is_taken_away(self):
+        import tempfile
+        import cv2
+        from strata import chain
+
+        class Job:
+            def step(self, *a, **k):
+                pass
+
+        with tempfile.TemporaryDirectory() as folder:
+            measures = []
+            for k in range(12):
+                a = figure_alpha(x=40 + 2 * k)
+                if k == 6:
+                    a[10:150, 86:116] = 1.0           # a lit pillar beside the figure, for one frame
+                cv2.imwrite(os.path.join(folder, f"{k:06d}.png"), (a * 255).astype(np.uint8))
+                measures.append(cut.measure(a))
+            self.assertIn(6, cut.suspects(measures))
+            steadied = chain._steady_suspects(Job(), folder, measures)
+            after = cv2.imread(os.path.join(folder, "000006.png"), cv2.IMREAD_GRAYSCALE)
+            self.assertEqual(int(after[20:140, 100:116].max()), 0, "the pillar is gone")
+            self.assertGreater(int(after[100, 52]), 250, "the figure stays")
+            self.assertNotIn(6, cut.suspects(steadied))
 
 
 if __name__ == "__main__":

@@ -104,7 +104,7 @@
         c.spine = Object.assign({}, Core.SPINE_DEFAULTS, c.spine);
         c.look = Object.assign({ fade: 0.35, tint: '#8fb8ff', tint_amount: 0.0, glow: 0, glow_color: '#5ff2ff', rib: 0.25, reverse: false, shadow: 0.35 }, c.look);
         c.cut = Object.assign({ start: 0, end: null, fps: null, max_frames: 600, matte: 'auto', model: null, key_colour: null,
-                                align: 'centre', scale: 'steady', height: 768, figure: 0.84, baseline: 0.95 }, c.cut);
+                                align: 'centre', scale: 'steady', ground: 12, height: 768, figure: 0.84, baseline: 0.95 }, c.cut);
         c.time = Object.assign({}, Core.TIME_DEFAULTS, c.time);
         delete c.grow;
         if (c.size == null) c.size = 1.7;
