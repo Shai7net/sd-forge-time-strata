@@ -123,11 +123,12 @@ def _alpha_of(frame, decided, options, prior=None, matter=None):
 
 
 def _save_alpha(path, alpha):
-    cv2.imwrite(path, (np.clip(alpha, 0, 1) * 255).round().astype(np.uint8))
+    if not media.imwrite(path, (np.clip(alpha, 0, 1) * 255).round().astype(np.uint8)):
+        raise jobs.JobError(f"the cut of a frame could not be saved: {path}")
 
 
 def _load_alpha(path):
-    image = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    image = media.imread(path, cv2.IMREAD_GRAYSCALE)
     if image is None:
         raise jobs.JobError(f"the cut of a frame is missing: {os.path.basename(path)}")
     return image.astype(np.float32) / 255.0

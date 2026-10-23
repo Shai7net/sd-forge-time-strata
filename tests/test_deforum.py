@@ -167,6 +167,17 @@ class TextureTime(unittest.TestCase):
             self.assertGreater(int(texture.at(3.5).mean()), 170, "it loops")
             texture.close()
 
+class HebrewProject(unittest.TestCase):
+    def test_deforum_works_in_a_plain_ascii_folder(self):
+        # (Deforum writes the frames it takes out of a video with OpenCV, which writes nothing under a Hebrew name)
+        here = os.path.join("D:\\", "x", "chains", "c1")
+        self.assertEqual(deforum._work_root(here), os.path.join(here, "deforum"))
+        hebrew = os.path.join("D:\\", "השכבות שלי2", "chains", "c1")
+        work = deforum._work_root(hebrew)
+        self.assertTrue(os.path.abspath(work).isascii())
+        self.assertNotEqual(work, deforum._work_root(os.path.join("D:\\", "השכבות שלי1", "chains", "c1")), "one folder for each chain")
+
+
 class SkipEmpty(unittest.TestCase):
     def test_motion_frames_with_no_figure_are_not_drawn(self):
         import tempfile

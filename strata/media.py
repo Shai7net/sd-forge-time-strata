@@ -19,6 +19,26 @@ def ffmpeg():
     return imageio_ffmpeg.get_ffmpeg_exe()
 
 
+def imread(path, flags=None):
+    """cv2.imread for any path: OpenCV's own file reading on Windows fails silently on a path that is not plain
+    ASCII (a project named in Hebrew), so the bytes are read here and decoded. None when there is no picture."""
+    import cv2
+    try:
+        data = np.fromfile(path, np.uint8)
+    except OSError:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_COLOR if flags is None else flags) if data.size else None
+
+
+def imwrite(path, image):
+    """cv2.imwrite for any path (see imread); the kind of picture follows the name's extension."""
+    import cv2
+    ok, data = cv2.imencode(os.path.splitext(path)[1] or ".png", image)
+    if ok:
+        data.tofile(path)
+    return bool(ok)
+
+
 def natural_key(name):
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", name)]
 

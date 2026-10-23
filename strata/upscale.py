@@ -21,7 +21,7 @@ import zipfile
 import cv2
 import numpy as np
 
-from . import jobs
+from . import jobs, media
 
 MODELS = {"realesr-animevideov3": (2, 3, 4), "realesrgan-x4plus": (4,), "realesrgan-x4plus-anime": (4,)}
 CHOICES = ["realesr-animevideov3:2", "realesr-animevideov3:4", "realesrgan-x4plus:2", "realesrgan-x4plus:4",
@@ -158,10 +158,10 @@ def upscale_folder(source, target, choice, job=None, share=(0.0, 1.0)):
     if native != scale:
         for n in made:
             path = os.path.join(target, n)
-            picture = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            picture = media.imread(path, cv2.IMREAD_UNCHANGED)
             h, w = picture.shape[:2]
             smaller = cv2.resize(picture, (max(1, w * scale // native), max(1, h * scale // native)), interpolation=cv2.INTER_AREA)
-            cv2.imwrite(path, smaller)
+            media.imwrite(path, smaller)
     return len(pictures)
 
 
@@ -192,19 +192,19 @@ def upscaled_frames(job, folder, count, frames, choice, share=(0.0, 0.2)):
                 continue
             # the program gets colour only (its four-channel path garbles small pictures: colours off, alpha
             # 59); a frame's own transparency is enlarged on its own and put back
-            cv2.imwrite(os.path.join(source, f"{n:06d}.png"), cv2.cvtColor(np.ascontiguousarray(frame[..., :3]), cv2.COLOR_RGB2BGR))
+            media.imwrite(os.path.join(source, f"{n:06d}.png"), cv2.cvtColor(np.ascontiguousarray(frame[..., :3]), cv2.COLOR_RGB2BGR))
             if frame.shape[2] == 4 and frame[..., 3].min() < 255:
-                cv2.imwrite(os.path.join(alphas, f"{n:06d}.png"), frame[..., 3])
+                media.imwrite(os.path.join(alphas, f"{n:06d}.png"), frame[..., 3])
             if job and n % 16 == 0:
                 job.step(f"setting out frame {n + 1} of {count} for upscaling", share[0] + (share[1] - share[0]) * 0.1 * n / count)
         from . import cut
         cut.free_graphics_memory()           # (Vulkan shares the card with Forge's models)
         upscale_folder(source, made, choice, job, (share[0] + (share[1] - share[0]) * 0.1, share[1]))
         for name in os.listdir(alphas):
-            colour = cv2.imread(os.path.join(made, name), cv2.IMREAD_COLOR)
-            alpha = cv2.resize(cv2.imread(os.path.join(alphas, name), cv2.IMREAD_GRAYSCALE), (colour.shape[1], colour.shape[0]),
+            colour = media.imread(os.path.join(made, name), cv2.IMREAD_COLOR)
+            alpha = cv2.resize(media.imread(os.path.join(alphas, name), cv2.IMREAD_GRAYSCALE), (colour.shape[1], colour.shape[0]),
                                interpolation=cv2.INTER_CUBIC)
-            cv2.imwrite(os.path.join(made, name), np.dstack([colour, alpha]))
+            media.imwrite(os.path.join(made, name), np.dstack([colour, alpha]))
         if not same:
             shutil.rmtree(out, ignore_errors=True)
         os.makedirs(out, exist_ok=True)
@@ -218,7 +218,7 @@ def upscaled_frames(job, folder, count, frames, choice, share=(0.0, 0.2)):
 
     def again():
         for name in names:
-            picture = cv2.imread(os.path.join(out, name), cv2.IMREAD_UNCHANGED)
+            picture = media.imread(os.path.join(out, name), cv2.IMREAD_UNCHANGED)
             if picture.ndim == 2:
                 picture = cv2.cvtColor(picture, cv2.COLOR_GRAY2BGRA)
             elif picture.shape[2] == 3:

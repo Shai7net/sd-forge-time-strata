@@ -19,12 +19,14 @@ it, on a backdrop whose colour is known. And:
 """
 
 import glob
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -656,15 +658,29 @@ def _put_back_checkpoint(title):
         print(f"[Time Strata] Forge's checkpoint could not be put back ({e}); choose it again in Forge")
 
 
+def _work_root(folder):
+    """Where Deforum works for a chain's folder: inside it, or - when its path is not plain ASCII (a project named
+    in Hebrew) - in a folder of its own under Forge's outputs, since Deforum writes the frames it takes out of
+    a video with OpenCV, which writes nothing to such a path on Windows."""
+    if os.path.abspath(folder).isascii():
+        return os.path.join(folder, "deforum")
+    key = hashlib.sha1(os.path.abspath(folder).encode("utf8")).hexdigest()[:16]
+    places = [os.path.join(store._webui(), "outputs", "time-strata-deforum"), os.path.join(tempfile.gettempdir(), "time-strata-deforum"),
+              os.path.join(os.path.splitdrive(os.path.abspath(folder))[0] + os.sep, "time-strata-deforum")]
+    return os.path.join(next((p for p in places if os.path.abspath(p).isascii()), places[-1]), key)
+
+
 def _run(job, folder, motion, data, name, options, live=False, share=(0.06, 0.9)):
     """One Deforum render of `data` into the chain's folder: its drawn frames' paths, in order. With `live`,
     each frame is also cut and shown while Deforum goes on."""
-    out_root = os.path.join(folder, "deforum")
+    out_root = _work_root(folder)
     shutil.rmtree(out_root, ignore_errors=True)
     os.makedirs(out_root)
     settings_path = os.path.join(folder, f"{name}.json" if not live else "deforum_settings.json")
+    # (plain ASCII: Deforum reads the file in Windows' own encoding, which turned a Hebrew folder name into
+    # gibberish and lost the motion video)
     with open(settings_path, "w", encoding="utf8") as file:
-        json.dump(data, file, ensure_ascii=False, indent=1)
+        json.dump(data, file, ensure_ascii=True, indent=1)
     import deforum_api
     from modules import shared
     from modules.call_queue import queue_lock
@@ -752,7 +768,7 @@ def _anchor_scenes(job, project, source, target, folder, options, scenes, units,
         path = os.path.join(anchors, f"look_{i}.png")
         Image.fromarray(picture).save(path)
         scene["look"] = store.relative(project, path)
-    shutil.rmtree(os.path.join(anchors, "deforum"), ignore_errors=True)
+    shutil.rmtree(_work_root(anchors), ignore_errors=True)
 
 
 def redraw_map(drawn_with, frames, count):
@@ -824,6 +840,7 @@ def _redraw(job, project, source, target, folder, options, scenes, units, uses, 
             if os.path.isfile(old):
                 os.remove(old)              # (enlarged again from the new drawing when the chain is cut)
     finally:
+        shutil.rmtree(_work_root(sub), ignore_errors=True)     # (Deforum's folder, when it could not be inside)
         shutil.rmtree(sub, ignore_errors=True)
     extra = dict(record.get("extra") or {})
     extra["deforum"] = dict(drawn_with, redrawn=sorted(set(drawn_with.get("redrawn") or []) | set(frames)))
@@ -882,7 +899,7 @@ def generate(job):
     except BaseException:
         # a drawing cancelled or failed leaves no live frames behind (the chain keeps what it had)
         shutil.rmtree(os.path.join(folder, "live"), ignore_errors=True)
-        shutil.rmtree(os.path.join(folder, "deforum"), ignore_errors=True)
+        shutil.rmtree(_work_root(folder), ignore_errors=True)
         raise
     if not drawn:
         raise jobs.JobError("Deforum drew no frames (see Forge's console)")
@@ -893,7 +910,7 @@ def generate(job):
     os.makedirs(pictures)
     for n, path in enumerate(drawn[:motion["frames"]]):
         shutil.copyfile(path, os.path.join(pictures, f"{n:06d}.png"))
-    shutil.rmtree(os.path.join(folder, "deforum"), ignore_errors=True)    # Deforum's own copies and its extracted frames
+    shutil.rmtree(_work_root(folder), ignore_errors=True)    # Deforum's own copies and its extracted frames
 
     prior_folder = os.path.join(folder, "prior")
 
