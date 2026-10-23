@@ -185,3 +185,119 @@ test('the present holds on the last frame, which then stays', () => {
     assert.strictEqual(C.presence(time, 49, C.presentAt(time, 100, 24, 49)), 1, 'the last frame is still there');
     assert.strictEqual(C.presence(time, 48, C.presentAt(time, 100, 24, 49)), 0);
 });
+
+test('a steered spine turns and climbs as it was steered, and can be softened afterwards', () => {
+    const straight = C.spinePath({ shape: 'steered', spacing: 0.05, steer: [] }, 5, 0.01);
+    near(C.pointAt(straight, 5).p[2], -5, 0.02, 'no steering: straight on');
+    // 1 degree a frame to the right for 90 frames: a quarter turn
+    const right = C.spinePath({ shape: 'steered', spacing: 0.05, steer: [[0, 1, 0], [89, 1, 0], [90, 0, 0]] }, 10, 0.01);
+    const end = C.pointAt(right, right.length - 0.02).t;
+    near(Math.atan2(end[0], -end[2]) * 180 / Math.PI, 90, 1.5, 'turned right a quarter');
+    const up = C.spinePath({ shape: 'steered', spacing: 0.05, steer: [[0, 0, 30]] }, 4, 0.01);
+    near(C.pointAt(up, up.length).p[1], up.length * 0.5, 0.05, 'a 30 degree climb rises half the length');
+    const half = C.spinePath({ shape: 'steered', spacing: 0.05, steer: [[0, 1, 0], [89, 1, 0], [90, 0, 0]], steer_scale: 0.5 }, 10, 0.01);
+    const halfEnd = C.pointAt(half, half.length - 0.02).t;
+    near(Math.atan2(halfEnd[0], -halfEnd[2]) * 180 / Math.PI, 45, 1.5, 'steering strength scales it');
+    // a sudden kink smoothed: the largest turn between two frames gets smaller
+    const kink = [[0, 0, 0], [40, 0, 0], [41, 20, 0], [42, 0, 0]];
+    const s = C.steering({ steer: kink, steer_smooth: 0 }), soft = C.steering({ steer: kink, steer_smooth: 4 });
+    assert.ok(Math.max(...[39, 40, 41, 42, 43].map(k => soft(k)[0])) < Math.max(...[39, 40, 41, 42, 43].map(k => s(k)[0])) / 3);
+});
+
+test('the follow camera frames the figure at the asked size, from the asked side', () => {
+    const path = C.spinePath({ shape: 'line' }, 20, 0.01);
+    for (const fov of [35, 50, 70]) {
+        const cam = C.followAt([{ t: 0, yaw: 0, elevation: 0, fill: 0.5, aim: 0.5, lead: 0, fov }], path, 0, { s: 8, size: 1.7, faces: 'start' });
+        const figureOnScreen = 1.7 / (cam.distance * 2 * Math.tan(fov * Math.PI / 360));
+        near(figureOnScreen, 0.5, 1e-9, `fill at fov ${fov}`);
+    }
+    // the figure faces the spine's start (-z here goes forward, so it faces +z): yaw 0 puts the camera at +z of it
+    const front = C.followAt([{ t: 0, yaw: 0, elevation: 0, fill: 0.5, lead: 0 }], path, 0, { s: 8, size: 1.7, faces: 'start' });
+    assert.ok(front.eye[2] > -8 + 1, 'in front of the face');
+    near(front.eye[0], 0, 1e-6);
+    const side = C.followAt([{ t: 0, yaw: 90, elevation: 0, fill: 0.5, lead: 0 }], path, 0, { s: 8, size: 1.7, faces: 'start' });
+    near(Math.abs(side.eye[0]) > 1 ? 1 : 0, 1, 0, 'at its side');
+    near(side.eye[2], -8, 0.05);
+    const grown = C.followAt([{ t: 0, yaw: 0, elevation: 0, fill: 0.5, lead: 0 }], path, 0, { s: 8, size: 1.7, faces: 'end' });
+    assert.ok(grown.eye[2] < -8 - 1, 'a growing chain faces its end: the camera goes there');
+    const high = C.followAt([{ t: 0, yaw: 0, elevation: 30, fill: 0.5, lead: 0 }], path, 0, { s: 8, size: 1.7, faces: 'start' });
+    assert.ok(high.eye[1] > front.eye[1] + 0.5, 'elevation raises it');
+});
+
+test('the follow camera swings smoothly through a sharp turn of the trail', () => {
+    const path = C.spinePath({ shape: 'steered', spacing: 0.05, steer: [[0, 0, 0], [99, 0, 0], [100, 30, 0], [102, 30, 0], [103, 0, 0]] }, 15, 0.01);
+    const keys = [{ t: 0, yaw: 0, elevation: 5, fill: 0.5, lead: 0.5, smooth: 2 }];
+    let worst = 0, last = null;
+    for (let s = 2; s < 9; s += 0.05) {
+        const eye = C.followAt(keys, path, 0, { s, size: 1.7, faces: 'start' }).eye;
+        if (last) worst = Math.max(worst, C.len(C.sub(eye, last)));
+        last = eye;
+    }
+    assert.ok(worst < 0.25, `no jump of the camera (largest step ${worst.toFixed(3)} m for 5 cm of trail)`);
+});
+
+test('follow presets give keys for the whole shot', () => {
+    for (const name of ['front', 'side', 'behind', 'close', 'orbit', 'reveal']) {
+        const keys = C.followPreset(name, 12);
+        assert.ok(keys.length >= 1 && keys.every(k => isFinite(k.yaw) && k.fill > 0), name);
+    }
+});
+
+test('steering marks are thinned to where the steering changed, and the trail stays where it was', () => {
+    // a mark a frame, as recorded while steering: straight, a steady right turn, then a climb
+    const marks = [];
+    for (let k = 0; k <= 300; k++) marks.push([k, k < 100 ? 0 : k < 200 ? 0.6 : 0, k < 200 ? 0 : 12]);
+    const thin = C.compressSteer(marks);
+    assert.ok(thin.length < 12, `few marks are left (${thin.length})`);
+    assert.deepStrictEqual(thin[0], marks[0]);
+    assert.deepStrictEqual(thin[thin.length - 1], marks[marks.length - 1]);
+    const a = C.spinePath({ shape: 'steered', spacing: 0.03, steer: marks }, 9, 0.01);
+    const b = C.spinePath({ shape: 'steered', spacing: 0.03, steer: thin }, 9, 0.01);
+    for (const s of [1, 3, 4.5, 6, 8.9]) {
+        const d = C.len(C.sub(C.pointAt(a, s).p, C.pointAt(b, s).p));
+        assert.ok(d < 0.01, `the same trail at ${s} m (${d.toFixed(4)} m apart)`);
+    }
+});
+
+test('a steered trail with a mark every frame is found quickly and exactly', () => {
+    const marks = [];
+    for (let k = 0; k <= 2000; k++) marks.push([k, Math.sin(k / 50) * 0.5, 0]);
+    const steer = C.steering({ steer: marks });
+    near(steer(1000)[0], Math.sin(20) * 0.5, 1e-9);
+    near(steer(1000.5)[0], (Math.sin(20) + Math.sin(1001 / 50)) * 0.25, 1e-9);
+    const started = Date.now();
+    C.spinePath({ shape: 'steered', spacing: 0.03, steer: marks }, 60, 0.01);
+    assert.ok(Date.now() - started < 400, 'a long steered trail is worked out in a moment');
+});
+
+test('looking ahead never takes the figure out of an upright picture', () => {
+    const path = C.spinePath({ shape: 'line', spacing: 0.04 }, 20, 0.01);
+    const aspect = 9 / 16, fov = 45;
+    const half = Math.atan(Math.tan(fov / 2 * Math.PI / 180) * aspect);
+    for (const yaw of [0, 30, 50, 80]) {
+        const cam = C.followAt([{ t: 0, yaw, elevation: 10, fill: 0.5, aim: 0.55, lead: 6, smooth: 1, fov }], path, 0, { s: 8, size: 1.7, faces: 'end', aspect });
+        const figure = C.add(C.pointAt(path, 8).p, [0, 1.7 * 0.5, 0]);
+        const angle = Math.acos(C.dot(C.norm(C.sub(figure, cam.eye)), cam.forward));
+        assert.ok(angle <= 0.41 * half + 1e-3, `yaw ${yaw}: the figure is ${(angle / half * 100).toFixed(0)}% of the half picture from its middle`);
+    }
+    const ahead = C.followAt([{ t: 0, yaw: 0, elevation: 10, fill: 0.5, aim: 0.55, lead: 1, smooth: 1, fov }], path, 0, { s: 8, size: 1.7, faces: 'end', aspect });
+    assert.ok(C.len(C.sub(ahead.target, C.add(C.pointAt(path, 8).p, [0, 1.7 * 0.5, 0]))) > 0.9, 'seen from in front the look ahead is kept');
+});
+
+test('frame numbers are read as a person writes them', () => {
+    assert.deepStrictEqual(C.parseFrames('18-21, 44 50', 100), [18, 19, 20, 21, 44, 50]);
+    assert.deepStrictEqual(C.parseFrames('7, 3–5; 3', 100), [3, 4, 5, 7]);
+    assert.deepStrictEqual(C.parseFrames('12-9', 100), [9, 10, 11, 12]);
+    assert.deepStrictEqual(C.parseFrames('5, 300, x, 98-102', 100), [5, 98, 99]);
+    assert.deepStrictEqual(C.parseFrames('', 10), []);
+});
+
+test('a world video plays over the shot, or at its own speed again and again', () => {
+    // the leaders film: a 31 s world video over a 31 s shot turns colour when the leaders do
+    assert.strictEqual(C.worldVideoTime({}, 7, 31, 31), 7);
+    assert.strictEqual(C.worldVideoTime({ video_play: 'shot' }, 15.5, 31, 10), 5);
+    assert.ok(C.worldVideoTime({}, 40, 31, 10) < 10, 'never past its last frame');
+    assert.strictEqual(C.worldVideoTime({ video_play: 'own' }, 12, 31, 10), 2);
+    assert.strictEqual(C.worldVideoTime({ video_play: 'own', video_rate: 0.5, video_start: 1 }, 6, 31, 10), 4);
+    assert.strictEqual(C.worldVideoTime({ video_play: 'own' }, 3, 31, 0), 0);
+});

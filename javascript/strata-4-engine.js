@@ -72,9 +72,11 @@
     };
 
     E.open = async function (name) {
+        if (E.steering.on) E.stopSteering();
         await E.saveNow();
         const doc = await E.api('project?name=' + encodeURIComponent(name));
-        E.project = name; E.doc = upgrade(doc); E.time = 0; E.free = null; E.loaded = {};
+        E.project = name; E.doc = upgrade(doc); E.time = 0; E.free = null; E.followAdjust = null; E.loaded = {};
+        E.setDqt(E.doc.steer.dqt);
         try { localStorage.setItem('time-strata-project', name); } catch (e) { /* private window */ }
         E.emit('project');
         await E.loadWorld();
@@ -90,6 +92,10 @@
         doc.shot = Object.assign({ duration: 10, fps: 30, width: 1080, height: 1920 }, doc.shot);
         doc.world = Object.assign({ kind: 'sky', eye: 1.6, radius: 90, turn: 0, fog: 0.25 }, doc.world);
         doc.camera = Object.assign({ follow: null, keys: [] }, doc.camera);
+        // a camera that follows the figure is the way to start; a project made before it keeps its own keys
+        if (!doc.camera.mode) doc.camera.mode = doc.camera.keys.length ? 'keys' : 'follow';
+        if (!Array.isArray(doc.camera.follow_keys) || !doc.camera.follow_keys.length) doc.camera.follow_keys = Core.followPreset('front', doc.shot.duration);
+        doc.steer = Object.assign({ turn: 45, climb: 25, flip_turn: false, flip_climb: false, screen: true, dqt: false, dqt_camera: true, dqt_range: 3 }, doc.steer);
         doc.knife = Object.assign({ on: false, keys: [] }, doc.knife);
         // a frame dissolves before it reaches the lens: inside a chain the frames ahead are then read as slices,
         // instead of the nearest one filling the picture
@@ -103,7 +109,7 @@
     function fillChain(c) {
         c.spine = Object.assign({}, Core.SPINE_DEFAULTS, c.spine);
         c.look = Object.assign({ fade: 0.35, tint: '#8fb8ff', tint_amount: 0.0, glow: 0, glow_color: '#5ff2ff', rib: 0.25, reverse: false, shadow: 0.35 }, c.look);
-        c.cut = Object.assign({ start: 0, end: null, fps: null, max_frames: 600, matte: 'auto', model: null, key_colour: null,
+        c.cut = Object.assign({ start: 0, end: null, fps: null, max_frames: 600, matte: 'auto', model: null, key_colour: null, crop: 'auto', upscale: null,
                                 align: 'centre', scale: 'steady', ground: 12, height: 768, figure: 0.84, baseline: 0.95 }, c.cut);
         c.time = Object.assign({}, Core.TIME_DEFAULTS, c.time);
         delete c.grow;
@@ -200,8 +206,25 @@
         const job = await E.api('job/start', { kind: 'chain', params: { project: E.project, chain: id, source: c.source, options, realign: !!realign } });
         const result = await E.waitJob(job, progress);
         Object.assign(c, { frames: result.frames, make: result.make, width: result.width, height: result.height, fps: result.fps,
-                           figure: result.figure, baseline: result.baseline, suspects: result.suspects, method: result.method });
+                           figure: result.figure, baseline: result.baseline, suspects: result.suspects, figureless: result.figureless || [], method: result.method });
         if (c.to != null && c.to >= c.frames) c.to = null;
+        E.touch();
+        await E.loadFrames();
+        return result;
+    };
+
+    /* a chain cut again from its own source with Real-ESRGAN first (`choice` "model:scale"), at a frame `scale` times
+     * taller (at most 2048 px); a drawn chain keeps its backdrop's key and the motion it was drawn over */
+    E.sharpen = async function (id, choice, progress) {
+        const c = E.chain(id);
+        if (!c || !c.make) throw new Error('Make the chain first');
+        const scale = +String(choice).split(':')[1] || 2;
+        const job = await E.api('job/start', { kind: 'sharpen', params: { project: E.project, chain: id, upscale: choice,
+                                                                         height: Math.min(2048, Math.round((c.height || 768) * scale)) } });
+        const result = await E.waitJob(job, progress);
+        Object.assign(c, { frames: result.frames, make: result.make, width: result.width, height: result.height, fps: result.fps,
+                           figure: result.figure, baseline: result.baseline, suspects: result.suspects, figureless: result.figureless || [], method: result.method });
+        c.cut.upscale = choice; c.cut.height = result.height;
         E.touch();
         await E.loadFrames();
         return result;
@@ -220,18 +243,106 @@
         }
         c.generated = { from: sourceId, options: JSON.parse(JSON.stringify(options)) };
         E.touch();
-        const job = await E.api('job/start', { kind: 'deforum', params: { project: E.project, source: sourceId, chain: c.id, options } });
-        const result = await E.waitJob(job, progress);
+        const project = E.project, doc = E.doc;        // (another project may be opened while Deforum draws)
+        const job = await E.api('job/start', { kind: 'deforum', params: { project, source: sourceId, chain: c.id, options } });
+        // while Deforum draws, the new chain shows each frame as it comes, where the motion chain stands (which
+        // is hidden), the camera follows its newest frame, and it can be steered
+        const before = { frames: c.frames, width: c.width, height: c.height, fps: c.fps, figure: c.figure, baseline: c.baseline,
+                         visible: c.visible, fromVisible: from.visible, follow: E.doc.camera.follow };
+        let started = false;
+        const watch = now => {
+            if (progress) progress(now);
+            if (!now.live || now.status !== 'running') return;
+            if (!started) {
+                started = true;
+                Object.assign(c, { frames: now.live.total, width: now.live.width, height: now.live.height, fps: now.live.fps,
+                                   figure: from.figure, baseline: from.baseline, visible: true });
+                from.visible = false;
+                E.doc.camera.follow = c.id;
+                E.live = { chain: c.id, path: now.live.path, frames: now.live.frames, total: now.live.total, loaded: 0 };
+                if (E.steering.on || E.dqt.on) { if (E.steering.on) E.stopSteering(); E.startSteering(); }
+                E.loadFrames().then(() => E.liveMore(E.live && E.live.frames));
+                E.emit('live');
+            } else E.liveMore(now.live.frames);
+        };
+        let result;
+        try {
+            result = await E.waitJob(job, watch);
+        } catch (e) {
+            if (started) {
+                Object.assign(c, { frames: before.frames, width: before.width, height: before.height, fps: before.fps,
+                                   figure: before.figure, baseline: before.baseline, visible: before.visible });
+                from.visible = before.fromVisible;
+                doc.camera.follow = before.follow;
+            }
+            throw e;
+        } finally {
+            if (E.live && E.live.chain === c.id) {
+                if (E.steering.on && E.steering.chain === c.id) E.stopSteering();
+                E.live = null;
+                E.emit('live');
+                if (started && E.project === project) { E.touch(); E.loadFrames(); }
+            }
+        }
         Object.assign(c, { frames: result.frames, make: result.make, width: result.width, height: result.height, fps: result.fps,
-                           figure: result.figure, baseline: result.baseline, suspects: result.suspects, method: result.method,
+                           figure: result.figure, baseline: result.baseline, suspects: result.suspects, figureless: result.figureless || [], method: result.method,
                            source: { kind: 'pictures', path: `chains/${c.id}/source`, fps: result.fps } });
         c.visible = true;
         from.visible = false;
-        E.doc.camera.follow = c.id;
+        doc.camera.follow = c.id;
+        if (E.project !== project) {
+            // the drawing belongs to the project it was started in, which is no longer open: it is saved there
+            await E.api('project/save', { name: project, doc });
+            return c;
+        }
         E.touch();
         await E.loadFrames();
         return c;
     };
+
+    /* frames `frames` of drawn chain `targetId` drawn again (with `options` as set now, usually a new seed); the
+     * rest of the chain is kept and the chain is cut again */
+    E.redraw = async function (sourceId, options, targetId, frames, progress) {
+        const c = E.chain(targetId);
+        if (!c || !c.generated || !c.make) throw new Error('Only a drawn chain can have some of its frames drawn again');
+        if (!frames.length) throw new Error('Choose which frames to draw again');
+        const job = await E.api('job/start', { kind: 'deforum', params: { project: E.project, source: sourceId, chain: targetId,
+                                                                          options: Object.assign({}, options, { redraw: frames }) } });
+        const result = await E.waitJob(job, progress);
+        Object.assign(c, { frames: result.frames, make: result.make, width: result.width, height: result.height, fps: result.fps,
+                           figure: result.figure, baseline: result.baseline, suspects: result.suspects, figureless: result.figureless || [], method: result.method });
+        c.generated.redrawn = Array.from(new Set([...(c.generated.redrawn || []), ...(result.redrawn || frames)])).sort((a, b) => a - b);
+        E.touch();
+        await E.loadFrames();
+        return result;
+    };
+
+    /* the frames of the chain Deforum is drawing that are not on the graphics card yet, up to `count` */
+    E.liveMore = async function (count) {
+        const L = E.live;
+        if (!L || !E.renderer) return;
+        L.frames = Math.max(L.frames, count || 0);
+        if (L.pulling) return;
+        L.pulling = true;
+        try {
+            let added = 0;
+            while (E.live === L && L.loaded < Math.min(L.frames, L.total)) {
+                const entry = E.loaded[L.chain];
+                if (!entry || E.loading) break;            // (the full load is still going: it takes them)
+                const k = L.loaded;
+                const blob = await (await fetch(E.fileUrl(`${L.path}/${String(k).padStart(6, '0')}.webp`))).blob();
+                if (E.live !== L || E.loaded[L.chain] !== entry) return;
+                await E.renderer.upload(entry.base + k, blob);
+                L.loaded++;
+                added++;
+            }
+            if (added) { E.renderer.finishUploads(); E.emit('frames'); }
+        } catch (e) {
+            console.warn('[Time Strata] live frame', e);
+        } finally { L.pulling = false; }
+    };
+
+    E.isLive = c => !!(c && E.live && E.live.chain === c.id);
 
     /* ---- frames on the graphics card ---- */
 
@@ -242,7 +353,7 @@
         return owner && owner.make && owner.frames > 0 ? owner : c;
     };
 
-    E.shownChains = () => (E.doc ? E.doc.chains.filter(c => c.visible && E.ownerOf(c).make && E.ownerOf(c).frames > 0) : []);
+    E.shownChains = () => (E.doc ? E.doc.chains.filter(c => c.visible && (E.isLive(c) || (E.ownerOf(c).make && E.ownerOf(c).frames > 0))) : []);
 
     E.loadFrames = async function () {
         const R = E.renderer;
@@ -262,8 +373,13 @@
         let base = 0;
         const todo = [], byOwner = {};
         for (const o of owners) {
-            byOwner[o.id] = { make: o.make, base, frames: Math.min(o.frames, R.maxLayers - base) };
-            for (let k = 0; k < byOwner[o.id].frames; k++) todo.push([base + k, `chains/${o.id}/${o.make}/${String(k).padStart(6, '0')}.webp`]);
+            const live = E.isLive(o);
+            byOwner[o.id] = { make: live ? 'live' : o.make, base, frames: Math.min(o.frames, R.maxLayers - base) };
+            // (a chain Deforum is drawing: the frames drawn so far; the rest come as they are drawn)
+            const have = live ? Math.min(E.live.frames, byOwner[o.id].frames) : byOwner[o.id].frames;
+            const folder = live ? E.live.path : `chains/${o.id}/${o.make}`;
+            for (let k = 0; k < have; k++) todo.push([base + k, `${folder}/${String(k).padStart(6, '0')}.webp`]);
+            if (live) E.live.loaded = have;
             base += o.frames;
             if (base >= R.maxLayers) break;
         }
@@ -293,19 +409,29 @@
 
     /* ---- the world ---- */
 
+    E.isVideo = path => /\.(mp4|webm|mov|m4v|mkv)$/i.test(String(path || ''));
+
     E.loadWorld = async function () {
         if (!E.renderer || !E.doc) return;
         const W = E.doc.world;
-        await E.renderer.setPanorama(W.kind === 'panorama' && W.panorama ? E.fileUrl(W.panorama) : null);
+        const panorama = W.kind === 'panorama' && W.panorama;
+        await E.renderer.setPanorama(panorama ? E.fileUrl(W.panorama) : null, panorama && E.isVideo(W.panorama));
         E.emit('world');
     };
+
+    /* the second of the world video seen at second `t` of the shot (see Core.worldVideoTime) */
+    E.worldVideoTime = t => Core.worldVideoTime(E.doc.world, t, E.doc.shot.duration, E.renderer ? E.renderer.panoramaDuration() : 0);
 
     /* ---- the scene at a moment ---- */
 
     const pathCache = new Map();
     E.pathOf = function (c) {
         const length = Core.chainLength(c, Math.max(1, E.ownerOf(c).frames || 1)) + 2;
-        const key = c.id + JSON.stringify(c.spine) + '|' + length.toFixed(3);
+        // (a steered spine's marks grow at its end while it is steered: the key holds their count and the last
+        // two, and E.steerEdits for any other change, instead of all of them)
+        const steer = c.spine.steer || [];
+        const spine = Object.assign({}, c.spine, { steer: steer.length + ':' + JSON.stringify(steer.slice(-2)) + ':' + E.steerEdits });
+        const key = c.id + JSON.stringify(spine) + '|' + length.toFixed(3);
         let path = pathCache.get(key);
         if (!path) {
             path = Core.spinePath(c.spine, length, 0.01);
@@ -343,17 +469,44 @@
                            c && c.time.mode === 'past' ? -1 : 1);
     };
 
-    /* the camera at time t: the keys (or, without keys, the reel's opening) */
+    /* where the figure the camera follows is at time t: its present, or (a chain without one) the `along` key */
+    E.figurePlace = function (c, t) {
+        if (!c) return { s: 0, size: 1.7, faces: 'start', aspect: E.doc.shot.width / E.doc.shot.height };
+        // (while it is steered the camera stays with the frame being steered, also on a chain where all frames stand)
+        const steered = E.steering.on && E.steering.chain === c.id;
+        const g = E.cardGeometry(c), now = E.isLive(c) || steered ? E.headOf(c, t) : E.presentOf(c, t);
+        return { s: now == null ? null : Core.presentS(g, now), size: c.size || 1.7, faces: g.faces, aspect: E.doc.shot.width / E.doc.shot.height };
+    };
+
+    /* the follow keys as they are shown now: with what the mouse (or DeforumationQT) adds on top of them */
+    E.adjustedFollowKeys = function () {
+        const keys = E.doc.camera.follow_keys && E.doc.camera.follow_keys.length ? E.doc.camera.follow_keys : Core.followPreset('front', E.doc.shot.duration);
+        const a = E.followAdjust, q = E.dqtCamera;
+        if (!a && !q) return keys;
+        return keys.map(k => Object.assign({}, k, {
+            yaw: (k.yaw != null ? k.yaw : Core.FOLLOW_FIELDS.yaw) + (a ? a.yaw : 0) + (q ? q.yaw : 0),
+            elevation: Core.clamp((k.elevation != null ? k.elevation : Core.FOLLOW_FIELDS.elevation) + (a ? a.elevation : 0) + (q ? q.elevation : 0), -80, 85),
+            fill: Core.clamp((k.fill != null ? k.fill : Core.FOLLOW_FIELDS.fill) * (a ? a.fill : 1) * (q && q.fill ? q.fill : 1), 0.05, 1.6),
+            fov: q && q.fov ? q.fov : k.fov,
+        }));
+    };
+
+    /* the camera at time t: following the figure, or the keys along the chain (without keys, the reel's opening) */
     E.cameraAt = function (t) {
         const c = E.followed();
         const path = c ? E.pathOf(c) : Core.spinePath({ shape: 'line' }, 10, 0.01);
-        let keys = E.doc.camera.keys, shift = E.shiftAt(t);
-        if (!keys || !keys.length) {
-            keys = E.defaultKeys();
-            const now = c ? E.presentOf(c, t) : null;
-            shift = now == null ? 0 : Core.presentS(E.cardGeometry(c), now);
+        let cam;
+        if (E.doc.camera.mode === 'follow') {
+            cam = Core.followAt(E.adjustedFollowKeys(), path, t, E.figurePlace(c, t));
+        } else {
+            let keys = E.doc.camera.keys, shift = E.shiftAt(t);
+            if (!keys || !keys.length) {
+                keys = E.defaultKeys();
+                const now = c ? E.presentOf(c, t) : null;
+                shift = now == null ? 0 : Core.presentS(E.cardGeometry(c), now);
+            }
+            cam = Core.cameraAt(keys, path, t, shift);
         }
-        const cam = Core.cameraAt(keys, path, t, shift);
         if (E.free) {
             // looking around: the camera goes round a point, as the mouse says
             const f = E.free;
@@ -373,13 +526,15 @@
             if (!loaded) continue;
             const path = E.pathOf(c), geometry = E.cardGeometry(c);
             const list = Core.chainCards(geometry, path, loaded.frames);
-            const now = E.presentOf(c, t);
+            // a chain Deforum is drawing: the frames drawn so far stand, the newest is its present
+            const live = E.isLive(c);
+            const now = live ? Math.max(0, E.live.loaded - 1) : E.presentOf(c, t);
             const o = E.ownerOf(c);
             const L = c.look, n = Math.max(1, (c.to == null ? o.frames - 1 : c.to) - (c.from || 0));
             const tint = window.StrataGL.hex(L.tint), glowColor = window.StrataGL.hex(L.glow_color);
             const shown = [];
             for (const card of list) {
-                const there = Core.presence(c.time, card.k, now);
+                const there = live ? (card.k < E.live.loaded ? 1 : 0) : Core.presence(c.time, card.k, now);
                 if (there <= 0) continue;
                 // age: how far a frame is from the near end (the present, when there is one)
                 let age = now == null ? (card.k - (c.from || 0)) / n : Math.min(1, Math.abs(card.k - now) / n);
@@ -473,6 +628,8 @@
 
     E.draw = function () {
         if (!E.renderer || !E.doc) return;
+        // (a world video's frame for this moment: when it arrives, the page draws again)
+        E.renderer.panoramaFrame(E.worldVideoTime(E.time), false, () => E.emit('worldframe'));
         E.renderer.draw(E.sceneAt(E.time));
     };
 
@@ -497,8 +654,230 @@
             }
         }
         E.doc.camera.keys = keys.map(k => roundKey(k));
+        E.doc.camera.mode = 'keys';
         E.free = null;
         E.touch();
+    };
+
+    /* ---- the follow camera's keys ---- */
+
+    E.applyFollowPreset = function (name) {
+        E.doc.camera.follow_keys = Core.followPreset(name, E.doc.shot.duration).map(roundKey);
+        E.doc.camera.mode = 'follow';
+        E.followAdjust = null; E.free = null;
+        E.touch();
+    };
+
+    /* the follow values at time t, as the camera uses them (with the mouse's adjustment) */
+    E.followValues = function (t) {
+        const keys = E.adjustedFollowKeys(), out = {};
+        for (const [field, fallback] of Object.entries(Core.FOLLOW_FIELDS)) out[field] = Core.track(keys, field, t, fallback);
+        return out;
+    };
+
+    /* sets one follow value at the current moment: on the key there, or on a new key made from what is shown */
+    E.setFollowValue = function (field, value) {
+        const keys = E.doc.camera.follow_keys;
+        let key = keys.find(k => Math.abs(k.t - E.time) < 0.05);
+        if (!key) {
+            key = roundKey(Object.assign({ t: E.time }, E.followValues(E.time)));
+            keys.push(key);
+            keys.sort((a, b) => a.t - b.t);
+        }
+        key[field] = value;
+        E.touch();
+        return key;
+    };
+
+    /* ---- steering the trail ----
+     * The trail of a chain whose shape is 'steered' goes where it was steered: one step a frame, each turned and
+     * sloped by the marks of c.spine.steer ([step, degrees of turn a frame, degrees of climb]). Input (-1..1 for
+     * turn and climb) comes from the arrows, the joystick and DeforumationQT; it is smoothed, and while the
+     * chain's head moves (the shot plays, or Deforum draws new frames) every frame the head reaches gets a mark
+     * with the turn and climb of that moment. The trail beyond the head goes straight on until it is reached.
+     * Left and right are the screen's: from in front of the figure its own right is the screen's left. */
+    E.steering = { on: false, input: { turn: 0, climb: 0 }, dqt: null, turn: 0, climb: 0, last: null, chain: null, sign: 1, tail: false };
+    E.steerEdits = 0;           // bumped when marks change other than at the head (the trail is then worked out again)
+
+    /* a frame's step along a steered spine (it is walked one step a frame from its start) */
+    E.stepOf = (c, k) => Math.round(k - (c.from || 0) + (c.offset || 0) / Math.max(1e-6, c.spine.spacing || Core.SPINE_DEFAULTS.spacing));
+
+    /* a chain made ready to be steered: its shape becomes 'steered', keeping the way it already went */
+    E.makeSteered = function (c) {
+        if (c.spine.shape === 'steered') return;
+        const frames = Math.max(1, (E.ownerOf(c).frames || 1) - 1);
+        const turn = c.spine.shape === 'arc' ? c.spine.bend / frames : 0;
+        c.spine.steer = [[0, Math.round(turn * 1000) / 1000, 0]];
+        c.spine.shape = 'steered';
+        E.steerEdits++;
+        E.touch();
+    };
+
+    /* the head of a chain at time t: the newest frame it shows (Deforum's newest while it draws; else its
+     * present; a chain without one: as it plays) */
+    E.headOf = function (c, t) {
+        if (E.isLive(c)) return Math.max(0, E.live.loaded - 1);
+        const now = E.presentOf(c, t);
+        if (now != null) return Math.floor(now);
+        return Math.floor((c.time.rate || E.ownerOf(c).fps || 24) * t);
+    };
+
+    /* the trail as it was before the last take (or before it was straightened), for "Undo" */
+    function keepForUndo(c) {
+        E.steering.undo = { chain: c.id, shape: c.spine.shape, steer: JSON.parse(JSON.stringify(c.spine.steer || [])) };
+    }
+
+    E.undoSteering = function () {
+        const u = E.steering.undo, c = u && E.chain(u.chain);
+        if (!c) return;
+        if (E.steering.on) E.stopSteering();
+        c.spine.shape = u.shape; c.spine.steer = u.steer;
+        E.steering.undo = null;
+        E.steerEdits++;
+        E.touch();
+    };
+
+    E.startSteering = function () {
+        const c = (E.live && E.chain(E.live.chain)) || E.followed();
+        if (!c) throw new Error('Make a chain first');
+        if (!E.ownerOf(c).frames && !(E.live && E.live.chain === c.id)) throw new Error('This chain has no frames yet');
+        keepForUndo(c);
+        E.makeSteered(c);
+        Object.assign(E.steering, { on: true, chain: c.id, last: null, turn: 0, climb: 0, tail: false });
+        E.emit('steer');
+    };
+
+    /* ends steering: the marks are thinned to where the steering changed; after the last steered frame the
+     * trail goes straight on, level */
+    E.stopSteering = function () {
+        const S = E.steering;
+        const c = S.on ? E.chain(S.chain) : null;
+        let kept = null;
+        if (c && Array.isArray(c.spine.steer)) {
+            if (S.tail) c.spine.steer.pop();
+            if (S.last != null) {
+                c.spine.steer.push([S.last + 1, 0, 0]);
+                kept = [S.first, S.last];
+            }
+            c.spine.steer = Core.compressSteer(c.spine.steer);
+            E.steerEdits++;
+            E.touch();
+        }
+        Object.assign(S, { on: false, last: null, first: null, input: { turn: 0, climb: 0 }, turn: 0, climb: 0, tail: false });
+        E.emit('steer');
+        return kept;
+    };
+
+    /* the smoothed turn (degrees a second) and climb (degrees) the input asks for now */
+    E.steerTick = function (dt) {
+        const S = E.steering, cfg = E.doc.steer;
+        const c = E.chain(S.chain);
+        if (c && cfg.screen !== false) {
+            // which way the screen's right is on the trail, from where the camera stands now (with a margin,
+            // so a camera beside the figure does not flip it back and forth)
+            const cam = E.cameraAt(E.time);
+            const s = Core.presentS(E.cardGeometry(c), E.headOf(c, E.time));
+            const right = Core.pointAt(E.pathOf(c), s).r;
+            const d = Core.dot(Core.norm(Core.cross(cam.forward, cam.up)), right);
+            if (d > 0.25) S.sign = 1; else if (d < -0.25) S.sign = -1;
+        }
+        const turn = Core.clamp(S.input.turn + (S.dqt ? S.dqt.turn : 0), -1, 1);
+        const climb = Core.clamp(S.input.climb + (S.dqt ? S.dqt.climb : 0), -1, 1);
+        const k = 1 - Math.exp(-Math.max(0, dt) / 0.25);
+        const wantTurn = turn * cfg.turn * (cfg.flip_turn ? -1 : 1) * (cfg.screen !== false ? S.sign : 1);
+        const wantClimb = climb * cfg.climb * (cfg.flip_climb ? -1 : 1);
+        S.turn += (wantTurn - S.turn) * k;
+        S.climb += (wantClimb - S.climb) * k;
+    };
+
+    /* Marks the steering of the frame the head is on (head: a frame number). Called every tick: on the same
+     * frame it changes that frame's mark, so the trail ahead answers at once even while Deforum takes seconds
+     * a frame. Returns 'back' when the head went back (the shot started over), which ends a take. */
+    E.recordSteering = function (head) {
+        const S = E.steering;
+        if (!S.on || head == null) return null;
+        const c = E.chain(S.chain);
+        if (!c) return null;
+        const list = Array.isArray(c.spine.steer) ? c.spine.steer : (c.spine.steer = []);
+        const step = E.stepOf(c, head);
+        const rate = c.time.rate || E.ownerOf(c).fps || 24;
+        const mark = [step, Math.round(S.turn / rate * 1e4) / 1e4, Math.round(S.climb * 100) / 100];
+        if (S.last != null && step < S.last) return 'back';
+        if (S.tail) { list.pop(); S.tail = false; }
+        if (S.last == null) {
+            // steering starts here: what was steered from this frame on is steered anew; the trail before it
+            // keeps the way it had
+            while (list.length && list[list.length - 1][0] >= step) list.pop();
+            const prev = list[list.length - 1];
+            if (prev && step - 1 > prev[0]) list.push([step - 1, prev[1], prev[2]]);
+            list.push(mark);
+            S.first = S.last = step;
+            E.steerEdits++;
+        } else if (step === S.last && list.length && list[list.length - 1][0] === step) {
+            list[list.length - 1] = mark;
+        } else {
+            list.push(mark);
+            S.last = step;
+        }
+        // beyond the head the trail goes straight on, at the climb of now
+        list.push([S.last + 1, 0, mark[2]]);
+        S.tail = true;
+        E.touch();
+        return null;
+    };
+
+    E.clearSteering = function (c) {
+        if (E.steering.on && E.steering.chain === c.id) E.stopSteering();
+        keepForUndo(c);
+        c.spine.steer = [[0, 0, 0]];
+        E.steerEdits++;
+        E.touch();
+    };
+
+    /* ---- DeforumationQT: its pan steers the trail, its rotation and zoom move the follow camera ----
+     * Read only (the page asks the server, the server asks DeforumationQT's mediator). Pan left/right turns the
+     * trail, pan up/down makes it climb (each at `dqt_range` and more: full); rotate left/right turns the camera
+     * around the figure and rotate up/down raises it, as long as they are held (degrees a second); zooming in
+     * DeforumationQT brings the camera closer and its FOV becomes the lens, once they are moved. */
+    E.dqt = { on: false, running: false, values: {}, base: null, yaw: 0, elevation: 0, timer: null, busy: false };
+
+    E.setDqt = function (on) {
+        const Q = E.dqt;
+        Q.on = !!on;
+        clearInterval(Q.timer);
+        Q.timer = null;
+        if (!Q.on) { E.steering.dqt = null; E.dqtCamera = null; Q.base = null; Q.yaw = Q.elevation = 0; E.emit('dqt'); return; }
+        Q.last = performance.now();
+        Q.timer = setInterval(() => E.pollDqt().catch(() => null), 250);
+        E.pollDqt().catch(() => null);
+    };
+
+    E.pollDqt = async function () {
+        const Q = E.dqt;
+        if (!Q.on || Q.busy || !E.doc) return;
+        Q.busy = true;
+        try {
+            const answer = await E.api('dqt');
+            const wasRunning = Q.running;
+            Q.running = !!answer.running;
+            Object.assign(Q.values, answer.values || {});
+            if (Q.running !== wasRunning) E.emit('dqt');
+            const now = performance.now(), dt = Math.min(1, (now - Q.last) / 1000);
+            Q.last = now;
+            if (!Q.running) { E.steering.dqt = null; return; }
+            const cfg = E.doc.steer, v = Q.values, range = Math.max(0.05, +cfg.dqt_range || 3);
+            if (!Q.base) Q.base = { translation_z: v.translation_z || 0, fov: v.fov || 70 };
+            E.steering.dqt = { turn: Core.clamp((v.translation_x || 0) / range, -1, 1), climb: Core.clamp((v.translation_y || 0) / range, -1, 1) };
+            if (cfg.dqt_camera !== false) {
+                Q.yaw += (v.rotation_y || 0) * 20 * dt;
+                Q.elevation = Core.clamp(Q.elevation + (v.rotation_x || 0) * 15 * dt, -70, 70);
+                const zoom = (v.translation_z || 0) - Q.base.translation_z;
+                const fovMoved = Math.abs((v.fov || 70) - Q.base.fov) > 0.5;
+                E.dqtCamera = { yaw: Q.yaw, elevation: Q.elevation, fill: Core.clamp(Math.exp(zoom * 0.15), 0.3, 3),
+                                fov: fovMoved ? Core.clamp(v.fov, 10, 120) : null };
+            } else E.dqtCamera = null;
+            E.emit('dqt-values');
+        } finally { Q.busy = false; }
     };
 
     /* how many frames a riding shot uses and how many it needs (the present's frames plus the chain still seen
@@ -520,7 +899,20 @@
     E.keyHere = function () {
         const c = E.followed();
         if (!c) return null;
+        if (E.doc.camera.mode === 'follow' && !E.free) {
+            // the follow values seen now (the mouse's adjustment included) become a key here
+            const key = roundKey(Object.assign({ t: E.time }, E.followValues(E.time)));
+            if (E.presentOf(c, E.time) != null) delete key.along;        // (a chain with a present is followed there)
+            const keys = E.doc.camera.follow_keys.filter(k => Math.abs(k.t - E.time) > 1e-3);
+            keys.push(key);
+            keys.sort((a, b) => a.t - b.t);
+            E.doc.camera.follow_keys = keys;
+            E.followAdjust = null;
+            E.touch();
+            return key;
+        }
         const cam = E.cameraAt(E.time);
+        E.doc.camera.mode = 'keys';
         if (!E.doc.camera.keys.length) {
             E.doc.camera.keys = E.defaultKeys().map(roundKey);
             E.doc.camera.ride = c.time.mode !== 'all';
@@ -556,6 +948,8 @@
         // flown at the planned speed, starting where the flight would end at the shot's end
         keys[0].s = -1.2; keys[1].s = Math.min(L + 0.3, -1.2 + pace * E.doc.shot.duration);
         E.doc.camera.keys = keys;
+        E.doc.camera.mode = 'keys';
+        E.doc.camera.ride = false;
         E.touch();
     };
 
@@ -600,6 +994,7 @@
                     await Promise.all(scene.waiting);
                     scene = E.sceneAt(E.time);
                 }
+                await R.panoramaFrame(E.worldVideoTime(E.time), true);      // the world video at this very moment
                 R.draw(scene);
                 const t0 = performance.now();
                 let body;

@@ -122,6 +122,37 @@ class Align(unittest.TestCase):
         ms[20] = cut.measure(figure_alpha(half=40))
         ms[25] = {"empty": True, "width": 120, "height": 200}
         self.assertEqual(cut.suspects(ms), [20, 25])
+        self.assertEqual(cut.figureless(ms), [25])
+
+    def test_a_gap_between_shots_does_not_make_its_neighbours_suspect(self):
+        # (Four Elements: a whip pan left four frames with no figure or a sliver, and the three before them were
+        # called too large)
+        ms = self.measures()
+        sliver = np.zeros((200, 120), np.float32)
+        sliver[100:104, 50:70] = 1.0
+        for k in (21, 23):
+            ms[k] = cut.measure(sliver)
+        for k in (22, 24):
+            ms[k] = {"empty": True, "width": 120, "height": 200}
+        self.assertEqual(cut.figureless(ms), [21, 22, 23, 24])
+        self.assertEqual(cut.suspects(ms), [21, 22, 23, 24], "the figureless ones only (not believed when placing)")
+
+    def test_a_cut_is_judged_by_the_drawing_on_a_flat_backdrop(self):
+        frame = np.full((200, 120, 3), 128, np.uint8)
+        frame[30:190, 30:90] = (60, 160, 220)                 # what was drawn
+        right = np.zeros((200, 120), np.float32)
+        right[30:190, 30:90] = 1.0
+        kept, spill = cut.agreement(frame, right, (128, 128, 128))
+        self.assertGreater(kept, 0.99)
+        self.assertLess(spill, 0.01)
+        folded = frame.copy()
+        folded[80:150, 45:75] = 128                           # a grey fold of the robe, the backdrop's own colour
+        self.assertLess(cut.agreement(folded, right, (128, 128, 128))[1], 0.01, "inside the figure is not backdrop")
+        half = right.copy()
+        half[90:, :] = 0.0                                    # the body below the chest lost
+        wide = np.ones((200, 120), np.float32)                # the backdrop kept
+        found = [cut.agreement(frame, a, (128, 128, 128)) for a in (right, half, wide, np.zeros((200, 120), np.float32))]
+        self.assertEqual(cut.disagreeing(found, skip=[3]), [1, 2])
 
     def test_render_frame_places_and_never_brings_fog_back(self):
         a = figure_alpha()
@@ -160,6 +191,38 @@ class Steady(unittest.TestCase):
             self.assertGreater(int(after[100, 52]), 250, "the figure stays")
             self.assertNotIn(6, cut.suspects(steadied))
 
+
+
+class KnownFigure(unittest.TestCase):
+    def test_a_thrown_rock_larger_than_the_figure_does_not_take_its_place(self):
+        a = figure_alpha(x=90, top=60, bottom=190, half=8)        # a thin figure, low in the picture
+        a[25:85, 5:60] = 1.0                                       # a big rock it throws, beside and above its head
+        prior = figure_alpha(x=90, top=60, bottom=190, half=9)
+        clean = cut.clean_alpha(a, prior=prior, prior_reach=0.5)
+        self.assertGreater(float(clean[120, 90]), 0.99, "the figure stays")
+        self.assertGreater(float(clean[50, 30]), 0.99, "and the rock it throws too, as it lies within reach")
+        alone = cut.clean_alpha(a)
+        self.assertEqual(float(alone[150, 90]), 0.0, "(without knowing where the figure is, the rock was taken for it)")
+        far = cut.clean_alpha(a, prior=prior, prior_reach=0.03)
+        self.assertGreater(float(far[120, 90]), 0.99, "the figure stays when the rock is out of reach")
+        self.assertEqual(float(far[50, 30]), 0.0)
+
+class Decide(unittest.TestCase):
+    def test_a_dark_fade_in_is_not_taken_for_a_flat_backdrop(self):
+        from strata import chain
+        rng = np.random.default_rng(3)
+        dark = np.zeros((64, 48, 4), np.uint8)
+        dark[..., 3] = 255
+        busy = rng.integers(0, 255, (64, 48, 4), dtype=np.uint8)
+        busy[..., 3] = 255
+        options = chain._options({})
+        self.assertEqual(chain._decide([dark] * 8 + [busy] * 8, options)["matte"], "model")
+        flat = np.zeros((64, 48, 4), np.uint8)
+        flat[...] = (40, 200, 60, 255)
+        flat[20:44, 18:30, :3] = 200                    # a figure in the middle of a green screen
+        decided = chain._decide([dark] * 8 + [flat] * 8, options)
+        self.assertEqual(decided["matte"], "key")
+        self.assertEqual([round(c) for c in decided["key_colour"]], [40, 200, 60])
 
 if __name__ == "__main__":
     unittest.main()

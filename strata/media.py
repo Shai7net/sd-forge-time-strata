@@ -19,6 +19,26 @@ def ffmpeg():
     return imageio_ffmpeg.get_ffmpeg_exe()
 
 
+def imread(path, flags=None):
+    """cv2.imread for any path: OpenCV's own file reading on Windows fails silently on a path that is not plain
+    ASCII (a project named in Hebrew), so the bytes are read here and decoded. None when there is no picture."""
+    import cv2
+    try:
+        data = np.fromfile(path, np.uint8)
+    except OSError:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_COLOR if flags is None else flags) if data.size else None
+
+
+def imwrite(path, image):
+    """cv2.imwrite for any path (see imread); the kind of picture follows the name's extension."""
+    import cv2
+    ok, data = cv2.imencode(os.path.splitext(path)[1] or ".png", image)
+    if ok:
+        data.tofile(path)
+    return bool(ok)
+
+
 def natural_key(name):
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", name)]
 
@@ -43,14 +63,18 @@ def probe(path):
             "fps": rate, "duration": seconds, "frames": int(round(seconds * rate)), "codec": codec, "alpha": alpha}
 
 
-def read_video(path, start=0.0, end=None, fps=None, max_side=1280):
+def read_video(path, start=0.0, end=None, fps=None, max_side=1280, crop=None):
     """The frames of a video, one RGBA array at a time. `fps`: take that many frames a second (None: all of
-    them); `max_side`: frames larger than this are made smaller first (the cut does not need more)."""
+    them); `max_side`: frames larger than this are made smaller first (the cut does not need more); `crop`:
+    (x, y, w, h) of the video's own pixels to keep (see find_letterbox)."""
     info = probe(path)
     width, height = info["width"], info["height"]
+    filters = []
+    if crop:
+        x, y, width, height = (int(v) for v in crop)
+        filters.append(f"crop={width}:{height}:{x}:{y}")
     scale = min(1.0, float(max_side) / max(width, height)) if max_side else 1.0
     out_w, out_h = max(2, int(round(width * scale / 2)) * 2), max(2, int(round(height * scale / 2)) * 2)
-    filters = []
     if fps:
         filters.append(f"fps={float(fps):.6f}")
     if (out_w, out_h) != (width, height):
@@ -80,6 +104,34 @@ def read_video(path, start=0.0, end=None, fps=None, max_side=1280):
         process.kill()
         process.wait()
         process.stderr.close()
+
+
+def find_letterbox(path, start=0.0, end=None, dark=24, least=0.03):
+    """Black bars around a video's picture (a wide film inside an upright video, or the other way round):
+    (x, y, w, h) of the picture in the video's own pixels, or None when it has none. A row or a column is a bar
+    when it stays dark in every one of up to 24 frames spread over the part that is used, so a dark scene alone
+    is not taken for one."""
+    info = probe(path)
+    W, H = info["width"], info["height"]
+    length = (min(float(end), info["duration"]) if end else info["duration"]) - float(start or 0)
+    peak = None
+    for n, frame in enumerate(read_video(path, start, end, fps=min(4.0, 24.0 / max(0.5, length)), max_side=480)):
+        bright = frame[..., :3].max(axis=2)
+        peak = bright if peak is None else np.maximum(peak, bright)
+        if n >= 23:
+            break
+    if peak is None:
+        return None
+    rows, cols = np.nonzero(peak.max(axis=1) > dark)[0], np.nonzero(peak.max(axis=0) > dark)[0]
+    if not len(rows) or not len(cols):
+        return None
+    h, w = peak.shape
+    if max(rows[0], h - 1 - rows[-1]) < least * h and max(cols[0], w - 1 - cols[-1]) < least * w:
+        return None
+    sx, sy = W / w, H / h
+    x0, y0 = int(cols[0] * sx) // 2 * 2, int(rows[0] * sy) // 2 * 2
+    x1, y1 = min(W, int(np.ceil((cols[-1] + 1) * sx))), min(H, int(np.ceil((rows[-1] + 1) * sy)))
+    return (x0, y0, max(2, (x1 - x0) // 2 * 2), max(2, (y1 - y0) // 2 * 2))
 
 
 def count_video(path, start=0.0, end=None, fps=None):

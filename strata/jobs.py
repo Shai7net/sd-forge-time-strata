@@ -44,6 +44,7 @@ class Job:
         self.finished = None
         self.cancel_asked = False
         self.on_cancel = None           # what stops work that is not ours (Deforum)
+        self.live = None                # frames already made while the job runs (Deforum's, shown as they come)
 
     def step(self, stage=None, progress=None, preview=None):
         """Called by the work as it goes; raises when the user cancelled."""
@@ -63,6 +64,8 @@ class Job:
                   "position": _queue.index(self) + 1 if self in _queue else 0}
         if with_preview and self.preview and self.status == "running":
             answer["preview"] = self.preview
+        if self.live is not None:
+            answer["live"] = dict(self.live)
         return answer
 
 

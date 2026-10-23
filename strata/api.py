@@ -12,7 +12,7 @@ from urllib.parse import quote
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 
-from . import NAME, VERSION, chain, cut, deforum, export, jobs, store  # noqa: F401  (chain and deforum register their jobs)
+from . import NAME, VERSION, chain, cut, deforum, dqt, export, jobs, store, upscale  # noqa: F401  (chain and deforum register their jobs)
 
 _RANGE = re.compile(r"bytes=(\d*)-(\d*)")
 
@@ -36,13 +36,18 @@ def _deforum_present():
 
 def api_options():
     return {"name": NAME, "version": VERSION, "folder": store.root(), "exports": store.exports_dir(),
-            "models": cut.model_names(), "kinds": list(export.KINDS), "deforum": _deforum_present(),
+            "models": cut.model_names(), "kinds": list(export.KINDS), "deforum": _deforum_present(), "upscale": upscale.available(),
             "sim360": os.path.isdir(_sim360_root() or "")}
 
 
 def api_deforum_options():
     """What generating with Deforum can use here, and the user's last Deforum sampler, steps and CFG."""
     return deforum.available()
+
+
+def api_dqt():
+    """DeforumationQT's pan, rotation, zoom and lens now (read only), to steer the trail and the camera."""
+    return dqt.read()
 
 
 def api_projects():
@@ -275,6 +280,7 @@ def register(app: FastAPI):
     route = app.add_api_route
     route("/time-strata/options", api_options, methods=["GET"])
     route("/time-strata/deforum/options", api_deforum_options, methods=["GET"])
+    route("/time-strata/dqt", api_dqt, methods=["GET"])
     route("/time-strata/projects", api_projects, methods=["GET"])
     route("/time-strata/project", api_project, methods=["GET"])
     route("/time-strata/project/create", api_project_create, methods=["POST"])
