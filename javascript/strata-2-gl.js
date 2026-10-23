@@ -208,24 +208,71 @@ void main() { o = vec4(0.0, 0.0, 0.0, v_shade); }`;
             worldCount = idx.length;
         }
 
-        R.setPanorama = async function (url) {
+        function panoramaPicture(t, source) {
+            gl.bindTexture(gl.TEXTURE_2D, t);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, source);
+            gl.generateMipmap(gl.TEXTURE_2D);
+        }
+
+        /* The world's panorama: a picture, or (`video`) a video whose frame is chosen by panoramaFrame. A video is
+         * read whole into memory first, so it can be sent to any moment at once. */
+        R.setPanorama = async function (url, video) {
             if (url === R.panoUrl) return;
             R.panoUrl = url;
             if (R.pano) { gl.deleteTexture(R.pano); R.pano = null; }
+            if (R.panoVideo) { URL.revokeObjectURL(R.panoVideo.el.src); R.panoVideo.el.removeAttribute('src'); R.panoVideo = null; }
             if (!url) return;
             const blob = await (await fetch(url)).blob();
-            const bitmap = await createImageBitmap(blob, { colorSpaceConversion: 'none' });
-            if (R.panoUrl !== url) return;
+            let source, el = null;
+            if (video) {
+                el = document.createElement('video');
+                el.muted = true; el.playsInline = true; el.preload = 'auto';
+                const typed = new Blob([blob], { type: /\.webm$/i.test(url) ? 'video/webm' : 'video/mp4' });
+                await new Promise((resolve, reject) => {
+                    el.addEventListener('loadeddata', resolve, { once: true });
+                    el.addEventListener('error', () => reject(new Error('This video cannot be played here')), { once: true });
+                    el.src = URL.createObjectURL(typed);
+                });
+                source = el;
+            } else source = await createImageBitmap(blob, { colorSpaceConversion: 'none' });
+            if (R.panoUrl !== url) { if (el) URL.revokeObjectURL(el.src); return; }
             const t = gl.createTexture();
-            gl.bindTexture(gl.TEXTURE_2D, t);
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
-            gl.generateMipmap(gl.TEXTURE_2D);
+            panoramaPicture(t, source);
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
             if (aniso) gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT, 8);
-            bitmap.close && bitmap.close();
+            if (!video) source.close && source.close();
             R.pano = t;
+            R.panoVideo = el ? { el, shown: 0, seeking: null } : null;
+        };
+
+        R.panoramaDuration = () => (R.panoVideo ? R.panoVideo.el.duration || 0 : 0);
+
+        /* The world video's frame at second `time` of the video put on the panorama. With `wait`, a promise that
+         * ends when it is there (a recording draws only then); without, the seek goes on and `ready` is called
+         * when the frame is in place (the preview draws again). A frame already shown costs nothing. */
+        R.panoramaFrame = function (time, wait, ready) {
+            const V = R.panoVideo;
+            if (!V || !R.pano) return Promise.resolve();
+            const t = Math.max(0, Math.min(time, (V.el.duration || 0) - 0.001));
+            if (Math.abs(V.shown - t) < 0.004) return Promise.resolve();
+            if (V.seeking) return wait ? V.seeking.then(() => R.panoramaFrame(time, wait, ready)) : Promise.resolve();
+            V.seeking = new Promise(resolve => {
+                let timer = null;
+                const done = () => {
+                    V.el.removeEventListener('seeked', done);
+                    clearTimeout(timer);
+                    if (R.panoVideo === V && R.pano) { panoramaPicture(R.pano, V.el); V.shown = t; }
+                    V.seeking = null;
+                    resolve();
+                    if (ready) ready();
+                };
+                V.el.addEventListener('seeked', done);
+                timer = setTimeout(done, 3000);          // (a seek that never ends does not stop a recording)
+                V.el.currentTime = t;
+            });
+            return wait ? V.seeking : Promise.resolve();
         };
 
         /* ---- the frames ---- */

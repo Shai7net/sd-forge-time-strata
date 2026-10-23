@@ -409,12 +409,18 @@
 
     /* ---- the world ---- */
 
+    E.isVideo = path => /\.(mp4|webm|mov|m4v|mkv)$/i.test(String(path || ''));
+
     E.loadWorld = async function () {
         if (!E.renderer || !E.doc) return;
         const W = E.doc.world;
-        await E.renderer.setPanorama(W.kind === 'panorama' && W.panorama ? E.fileUrl(W.panorama) : null);
+        const panorama = W.kind === 'panorama' && W.panorama;
+        await E.renderer.setPanorama(panorama ? E.fileUrl(W.panorama) : null, panorama && E.isVideo(W.panorama));
         E.emit('world');
     };
+
+    /* the second of the world video seen at second `t` of the shot (see Core.worldVideoTime) */
+    E.worldVideoTime = t => Core.worldVideoTime(E.doc.world, t, E.doc.shot.duration, E.renderer ? E.renderer.panoramaDuration() : 0);
 
     /* ---- the scene at a moment ---- */
 
@@ -622,6 +628,8 @@
 
     E.draw = function () {
         if (!E.renderer || !E.doc) return;
+        // (a world video's frame for this moment: when it arrives, the page draws again)
+        E.renderer.panoramaFrame(E.worldVideoTime(E.time), false, () => E.emit('worldframe'));
         E.renderer.draw(E.sceneAt(E.time));
     };
 
@@ -986,6 +994,7 @@
                     await Promise.all(scene.waiting);
                     scene = E.sceneAt(E.time);
                 }
+                await R.panoramaFrame(E.worldVideoTime(E.time), true);      // the world video at this very moment
                 R.draw(scene);
                 const t0 = performance.now();
                 let body;

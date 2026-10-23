@@ -291,3 +291,13 @@ test('frame numbers are read as a person writes them', () => {
     assert.deepStrictEqual(C.parseFrames('5, 300, x, 98-102', 100), [5, 98, 99]);
     assert.deepStrictEqual(C.parseFrames('', 10), []);
 });
+
+test('a world video plays over the shot, or at its own speed again and again', () => {
+    // the leaders film: a 31 s world video over a 31 s shot turns colour when the leaders do
+    assert.strictEqual(C.worldVideoTime({}, 7, 31, 31), 7);
+    assert.strictEqual(C.worldVideoTime({ video_play: 'shot' }, 15.5, 31, 10), 5);
+    assert.ok(C.worldVideoTime({}, 40, 31, 10) < 10, 'never past its last frame');
+    assert.strictEqual(C.worldVideoTime({ video_play: 'own' }, 12, 31, 10), 2);
+    assert.strictEqual(C.worldVideoTime({ video_play: 'own', video_rate: 0.5, video_start: 1 }, 6, 31, 10), 4);
+    assert.strictEqual(C.worldVideoTime({ video_play: 'own' }, 3, 31, 0), 0);
+});

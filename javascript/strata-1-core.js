@@ -103,6 +103,18 @@
         return [...out].sort((x, y) => x - y);
     }
 
+    /* The moment of a world video shown at second `t` of the shot. `world.video_play` 'shot': the video plays once
+     * over the whole shot (as long as it is); 'own': at its own speed (`video_rate`), from `video_start`, again
+     * and again. Never past its last frame. */
+    function worldVideoTime(world, t, shotDuration, videoDuration) {
+        const d = +videoDuration || 0;
+        if (d <= 0) return 0;
+        const last = Math.max(0, d - 0.001);
+        if ((world.video_play || 'shot') === 'shot') return clamp(t / Math.max(1e-6, +shotDuration || 1) * d, 0, last);
+        const at = t * (world.video_rate == null ? 1 : +world.video_rate) + (+world.video_start || 0);
+        return Math.min(last, ((at % d) + d) % d);
+    }
+
     /* the spine's centre line as points every `step` metres of horizontal travel, from a description */
     function centreLine(spine, length, step) {
         const sp = Object.assign({}, SPINE_DEFAULTS, spine);
@@ -587,7 +599,7 @@
         SPINE_DEFAULTS, CHAIN_DEFAULTS, CAMERA_FIELDS, TIME_DEFAULTS, RIDING,
         centreLine, spinePath, pointAt, cardSize, chainCards, chainLength, presentAt, presence, presentS,
         track, cameraAt, nearestS, keyFromView, knifeAt, preset, plan, passRates, lookAt, perspective, multiply,
-        steering, compressSteer, parseFrames, FOLLOW_FIELDS, followAt, followPreset,
+        steering, compressSteer, parseFrames, worldVideoTime, FOLLOW_FIELDS, followAt, followPreset,
     };
     if (typeof module !== 'undefined' && module.exports) module.exports = Core;
     else root.StrataCore = Core;

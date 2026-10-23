@@ -818,7 +818,7 @@
 
     function worldPanel(body) {
         const W = E.doc.world;
-        const pano = h('input', { type: 'file', class: 'ts-file', accept: 'image/*' });
+        const pano = h('input', { type: 'file', class: 'ts-file', accept: 'image/*,video/*' });
         pano.addEventListener('change', guarded(async () => {
             if (!pano.files.length) return;
             say(T('Uploading…'));
@@ -827,8 +827,13 @@
         }));
         put(body,
             row(field('World', select(W, 'kind', [['sky', 'A sky and a ground'], ['panorama', 'A 360 panorama']], () => { E.loadWorld(); renderPanel(); }))),
-            W.kind === 'panorama' ? row(field('Panorama from the computer', pano)) : null,
+            W.kind === 'panorama' ? row(field('Panorama from the computer', pano, 'A 360 picture, or a 360 video: the world then changes while the shot plays')) : null,
             W.kind === 'panorama' && W.panorama ? note('Now: {0}', W.panorama.split('/').pop()) : null,
+            W.kind === 'panorama' && E.isVideo(W.panorama) ? row(
+                field('The video plays', select(W, 'video_play', [['shot', 'Once over the whole shot'], ['own', 'At its own speed, again and again']], () => { E.touch(); UI.needsDraw = true; renderPanel(); }),
+                      'Over the whole shot: its first frame at the shot\'s start and its last at the end, so it changes together with the figures'),
+                (W.video_play || 'shot') === 'own' ? field('Speed', number(W, 'video_rate', { min: 0.05, max: 8, step: 0.05 })) : null,
+                (W.video_play || 'shot') === 'own' ? field('From second', number(W, 'video_start', { min: 0, step: 0.1 })) : null) : null,
             row(field('The panorama was seen from (m)', number(W, 'eye', { min: 0.05, max: 50 }), 'How high above the ground the panorama was taken: the ground is put that far below its middle'),
                 field('Size of the world (m)', number(W, 'radius', { min: 5, max: 2000 })),
                 field('Turn (°)', number(W, 'turn', {}))),
@@ -1108,6 +1113,7 @@
                 if (status) status.textContent = dqtStatus();
             }
             if (what === 'frames') UI.mapStale = true;
+            if (what === 'worldframe') UI.needsDraw = true;
             UI.needsDraw = true;
         });
         window.addEventListener('keydown', keyboardSteering);
